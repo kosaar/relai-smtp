@@ -11,6 +11,8 @@ GitLab / Jenkins ──SMTP :25, clair, sans auth──▶ relai Postfix ──:
 ```
 
 Le schéma détaillé (zones, flux, contrôles) se trouve dans [architecture.md](architecture.md).
+Le guide de mise en production on-premise, avec Google Workspace ou OVHcloud comme
+fournisseur, se trouve dans [deploiement-production.md](deploiement-production.md).
 
 > **Valeurs d'exemple :** fournisseur `smtp.example-provider.com:587`, GitLab
 > `10.0.1.10`, Jenkins `10.0.1.20`, domaine `example.com`, expéditeur

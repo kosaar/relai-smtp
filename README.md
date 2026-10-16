@@ -13,3 +13,4 @@ tests/run-tests.sh              # tests d'intégration locaux
 
 - Documentation : [docs/README.md](docs/README.md)
 - Architecture : [docs/architecture.md](docs/architecture.md)
+- Mise en production on-premise (Google Workspace / OVHcloud) : [docs/deploiement-production.md](docs/deploiement-production.md)
