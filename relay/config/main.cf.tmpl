@@ -1,0 +1,80 @@
+# =============================================================================
+#  main.cf — GÉNÉRÉ AU DÉMARRAGE par entrypoint.sh à partir de main.cf.tmpl.
+#  Ne pas modifier dans le conteneur : changer les variables d'environnement.
+# =============================================================================
+compatibility_level = 3.6
+
+# --- Identité (dérivée de SENDER_DOMAIN) -------------------------------------
+myhostname = @@RELAY_HOSTNAME@@
+mydomain = @@SENDER_DOMAIN@@
+myorigin = $mydomain
+# Pas de nom ni de version de logiciel dans la bannière.
+smtpd_banner = $myhostname ESMTP
+inet_interfaces = all
+inet_protocols = @@INET_PROTOCOLS@@
+
+# --- Aucune réception ni livraison locale : ce n'est qu'un relai sortant -----
+mydestination =
+relay_domains =
+local_recipient_maps =
+local_transport = error:5.1.1 local delivery is disabled on this relay
+alias_maps =
+alias_database =
+biff = no
+
+# --- Liste blanche d'IP + refus par défaut ------------------------------------
+# mynetworks ne contient QUE les adresses d'hôtes déclarées (/32, /128).
+mynetworks = @@MYNETWORKS@@
+smtpd_client_restrictions = permit_mynetworks, reject
+smtpd_relay_restrictions = permit_mynetworks, reject
+smtpd_recipient_restrictions = permit_mynetworks, reject
+smtpd_data_restrictions = reject_unauth_pipelining
+# Le refus est appliqué à la commande RCPT TO : la ligne de log contient alors
+# l'IP source, l'expéditeur, le destinataire et le motif ("Access denied").
+smtpd_delay_reject = yes
+smtpd_reject_footer = Relay access is restricted to registered applications.
+smtpd_helo_required = yes
+disable_vrfy_command = yes
+smtpd_sasl_auth_enable = no
+# Réseau privé : ni TLS ni authentification côté applications (exigence).
+smtpd_tls_security_level = none
+message_size_limit = @@MESSAGE_SIZE_LIMIT@@
+mailbox_size_limit = 0
+
+# --- Réécriture de l'expéditeur ----------------------------------------------
+# Enveloppe (MAIL FROM) ET en-têtes (From:, Sender:, ...) ; le nom affiché est
+# conservé ("GitLab <noreply@example.com>").
+sender_canonical_maps = regexp:/etc/postfix/sender_canonical.regexp
+sender_canonical_classes = envelope_sender, header_sender
+# Par défaut Postfix ne réécrit pas les en-têtes des clients distants :
+# on l'autorise pour les applications déclarées.
+local_header_rewrite_clients = permit_mynetworks
+# Le Reply-To d'origine éventuel est conservé (non réécrit).
+
+# --- Relai sortant vers le fournisseur cloud ---------------------------------
+relayhost = [@@RELAY_HOST@@]:@@RELAY_PORT@@
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = texthash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_sasl_tls_security_options = noanonymous
+smtp_sasl_mechanism_filter = @@RELAY_SASL_MECHANISMS@@
+# Echec d'authentification = erreur temporaire : le message reste en file.
+smtp_sasl_auth_soft_bounce = yes
+
+# TLS obligatoire (encrypt) ou obligatoire + certificat vérifié (secure).
+smtp_tls_security_level = @@RELAY_TLS_SECURITY_LEVEL@@
+smtp_tls_wrappermode = @@RELAY_TLS_WRAPPERMODE@@
+smtp_tls_protocols = >=TLSv1.2
+smtp_tls_mandatory_protocols = >=TLSv1.2
+smtp_tls_ciphers = high
+smtp_tls_mandatory_ciphers = high
+smtp_tls_CAfile = @@RELAY_TLS_CA_FILE@@
+smtp_tls_secure_cert_match = nexthop, dot-nexthop
+smtp_tls_loglevel = 1
+
+# --- File d'attente ------------------------------------------------------------
+maximal_queue_lifetime = @@QUEUE_LIFETIME@@
+bounce_queue_lifetime = @@QUEUE_LIFETIME@@
+
+# --- Logs : stdout => "docker logs" -------------------------------------------
+maillog_file = /dev/stdout

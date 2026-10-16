@@ -1,0 +1,134 @@
+# =============================================================================
+#  Stack de TEST LOCAL — surcharge de docker-compose.yml (le relai testé est
+#  donc exactement celui de production, seuls les paramètres changent).
+#  Lancée par tests/run-tests.sh :
+#    docker compose -p smtp-relay-test --env-file tests/test.env \
+#      -f docker-compose.yml -f docker-compose.test.yml up -d --build
+#
+#  Réseaux (IP fixes) :
+#    private  10.0.1.0/24 : client-gitlab .10, client-jenkins .20,
+#                           client-unknown .30 (NON déclaré), relay .5,
+#                           relay-badcreds .6
+#    internet 10.0.2.0/24 : relay .5, relay-badcreds .6, fake-mta .10
+# =============================================================================
+
+x-relay-test-env: &relay-test-env
+  ALLOWED_CLIENT_IPS: "10.0.1.10,10.0.1.20"
+  SENDER_DOMAIN: example.com
+  SENDER_ADDRESS: noreply@example.com
+  SENDER_REWRITE_MODE: always
+  RELAY_HOST: fake-mta
+  RELAY_PORT: "587"
+  RELAY_TLS_SECURITY_LEVEL: secure
+  RELAY_TLS_CA_FILE: /etc/test-pki/ca.crt
+
+services:
+  relay:
+    environment: *relay-test-env
+    ports: !reset []
+    volumes:
+      - test-pki:/etc/test-pki:ro
+    networks: !override
+      private:
+        ipv4_address: 10.0.1.5
+      internet:
+        ipv4_address: 10.0.2.5
+    depends_on:
+      fake-mta:
+        condition: service_healthy
+    healthcheck:
+      interval: 5s
+      start_period: 10s
+
+  # Même image, identifiants SASL ERRONÉS : les mails doivent rester en file.
+  relay-badcreds:
+    extends:
+      file: docker-compose.yml
+      service: relay
+    hostname: relay-badcreds
+    environment:
+      <<: *relay-test-env
+      RELAY_SMTP_PASSWORD_FILE: /run/secrets/relay_smtp_password_bad
+    secrets:
+      - relay_smtp_password_bad
+    ports: !reset []
+    volumes: !override
+      - relay-badcreds-queue:/var/spool/postfix
+      - test-pki:/etc/test-pki:ro
+    networks: !override
+      private:
+        ipv4_address: 10.0.1.6
+      internet:
+        ipv4_address: 10.0.2.6
+    depends_on:
+      fake-mta:
+        condition: service_healthy
+    healthcheck:
+      interval: 5s
+      start_period: 10s
+
+  fake-mta:
+    build: ./test/fake-mta
+    image: smtp-relay-test/fake-mta:latest
+    hostname: fake-mta
+    secrets:
+      - relay_smtp_username
+      - relay_smtp_password
+    volumes:
+      - test-pki:/pki
+      - fake-mta-mail:/var/mail/captured
+    networks:
+      internet:
+        ipv4_address: 10.0.2.10
+
+  client-gitlab:
+    build: ./test/client
+    image: smtp-relay-test/client:latest
+    hostname: gitlab
+    init: true
+    networks:
+      private:
+        ipv4_address: 10.0.1.10
+
+  client-jenkins:
+    build: ./test/client
+    image: smtp-relay-test/client:latest
+    hostname: jenkins
+    init: true
+    networks:
+      private:
+        ipv4_address: 10.0.1.20
+
+  client-unknown:
+    build: ./test/client
+    image: smtp-relay-test/client:latest
+    hostname: unknown-app
+    init: true
+    networks:
+      private:
+        ipv4_address: 10.0.1.30
+
+networks:
+  private:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+  internet:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24
+
+volumes:
+  test-pki:
+  fake-mta-mail:
+  relay-badcreds-queue:
+
+secrets:
+  relay_smtp_username:
+    file: ./tests/.work/secrets/relay_smtp_username
+  relay_smtp_password:
+    file: ./tests/.work/secrets/relay_smtp_password
+  relay_smtp_password_bad:
+    file: ./tests/.work/secrets/relay_smtp_password_bad

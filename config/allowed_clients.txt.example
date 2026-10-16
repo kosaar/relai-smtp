@@ -1,0 +1,6 @@
+# Liste blanche du relai SMTP — une IP d'hôte par ligne (pas de CIDR).
+# Copier en config/allowed_clients.txt (ignoré par git), monter dans le
+# conteneur et définir ALLOWED_CLIENT_IPS_FILE=/etc/relay/allowed_clients.txt.
+# Rechargement à chaud : docker compose exec relay relay-reload-allowlist
+10.0.1.10   # GitLab CE   <À PRÉCISER>
+10.0.1.20   # Jenkins     <À PRÉCISER>

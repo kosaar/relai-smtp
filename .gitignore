@@ -1,0 +1,9 @@
+# Configuration locale et secrets : JAMAIS dans le dépôt
+.env
+secrets/*
+!secrets/README.md
+!secrets/*.example
+config/allowed_clients.txt
+
+# Artefacts de test
+tests/.work/

@@ -1,0 +1,41 @@
+# Faux MTA "fournisseur cloud" — TEST UNIQUEMENT.
+compatibility_level = 3.6
+myhostname = fake-mta
+mydomain = provider.test
+myorigin = $mydomain
+inet_interfaces = all
+inet_protocols = ipv4
+mydestination =
+relay_domains =
+local_recipient_maps =
+alias_maps =
+alias_database =
+mynetworks = 127.0.0.1/32
+
+# Tout message accepté (quel que soit le domaine) est capturé sur disque.
+default_transport = capture
+relay_transport = capture
+capture_destination_recipient_limit = 1
+
+# TLS obligatoire avant toute commande sensible ; AUTH uniquement sous TLS.
+smtpd_tls_security_level = encrypt
+smtpd_tls_auth_only = yes
+smtpd_tls_cert_file = /pki/fake-mta.crt
+smtpd_tls_key_file = /pki/fake-mta.key
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_loglevel = 1
+smtpd_tls_received_header = yes
+
+# SASL obligatoire pour relayer.
+smtpd_sasl_auth_enable = yes
+smtpd_sasl_type = cyrus
+smtpd_sasl_path = smtpd
+cyrus_sasl_config_path = /etc/postfix/sasl
+smtpd_sasl_local_domain = provider.test
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_authenticated_header = yes
+smtpd_relay_restrictions = permit_sasl_authenticated, reject
+smtpd_recipient_restrictions = permit_sasl_authenticated, reject
+
+maillog_file = /dev/stdout
