@@ -5,14 +5,14 @@
 #    générée au démarrage), TLS >= 1.2 ;
 #  - authentification SASL obligatoire (Cyrus SASL, base sasldb) ;
 #  - chaque message accepté est stocké dans /var/mail/captured/*.eml.
-ARG DEBIAN_TAG=trixie-20261005-slim
-FROM debian:${DEBIAN_TAG}
+ARG UBUNTU_TAG=resolute-20260927
+FROM ubuntu:${UBUNTU_TAG}
 # Un ARG déclaré avant FROM doit être redéclaré pour être visible ensuite.
-ARG DEBIAN_TAG
+ARG UBUNTU_TAG
 
 LABEL org.opencontainers.image.title="smtp-relay-test-fake-mta" \
       org.opencontainers.image.description="Faux MTA fournisseur cloud (Postfix + TLS + SASL) pour les tests du relai" \
-      org.opencontainers.image.base.name="docker.io/library/debian:${DEBIAN_TAG}"
+      org.opencontainers.image.base.name="docker.io/library/ubuntu:${UBUNTU_TAG}"
 
 # postfix + sasl2-bin (saslpasswd2) + libsasl2-modules (PLAIN/LOGIN) + openssl (PKI de test).
 ARG DEBIAN_FRONTEND=noninteractive

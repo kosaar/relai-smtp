@@ -60,7 +60,7 @@ flowchart LR
         FWI{{"🧱 Pare-feu — patte INTERNE<br/>routage LAN ↔ DMZ SANS NAT<br/>(l'IP source des applications est conservée)"}}
 
         subgraph DMZ["🟧 DMZ SORTANTE — VLAN 50 · 172.16.50.0/24"]
-            subgraph HOST["🖥 Hôte relay-01 · 172.16.50.25 · Debian + Docker"]
+            subgraph HOST["🖥 Hôte relay-01 · 172.16.50.25 · Ubuntu + Docker"]
                 direction TB
                 HFW["Pare-feu hôte (DOCKER-USER)<br/>25/tcp ← 10.0.1.10, 10.0.1.20 uniquement"]
                 RC["📨 Conteneur relay — Postfix<br/>publié sur 172.16.50.25:25<br/>liste blanche IP (/32) + refus par défaut<br/>réécriture expéditeur → noreply@example.com"]
@@ -133,7 +133,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    subgraph HOST["Hôte relay-01 (Debian 13, Docker Engine)"]
+    subgraph HOST["Hôte relay-01 (Ubuntu 26.04 LTS, Docker Engine)"]
         direction TB
         NIC["ens192 · 172.16.50.25/24<br/>passerelle 172.16.50.1 (pare-feu)"]
         subgraph NF["nftables / iptables"]
@@ -224,7 +224,7 @@ sequenceDiagram
 | F6 | `172.16.50.25` | `10.0.0.123` | 123/udp | NTP | — | aucun | ✅ autoriser (TLS exige une horloge juste) |
 | F7 | `10.0.9.10` (bastion) | `172.16.50.25` | 22/tcp | SSH | clé SSH | aucun | ✅ autoriser |
 | F8 | `172.16.50.25` | `10.0.9.20` | 514/tcp ou 6514/tcp | syslog | TLS recommandé | aucun | ✅ optionnel (centralisation des logs) |
-| F9 | `172.16.50.25` | miroir Debian / registre / proxy | 443/tcp | HTTPS | TLS | SNAT ou proxy | ✅ maintenance (build, mises à jour) |
+| F9 | `172.16.50.25` | miroir Ubuntu / registre / proxy | 443/tcp | HTTPS | TLS | SNAT ou proxy | ✅ maintenance (build, mises à jour) |
 | F10 | Internet | `172.16.50.25` ou `203.0.113.25` | * | * | — | — | ⛔ **refuser** (aucune redirection de port) |
 | F11 | `172.16.50.25` | Internet | 25/tcp | SMTP | — | — | ⛔ refuser (aucun envoi direct aux MX) |
 | F12 | LAN `10.0.0.0/8` | Internet | 25, 465, 587/tcp | SMTP | — | — | ⛔ refuser : les applications passent **obligatoirement** par le relai |
@@ -439,7 +439,7 @@ iptables -A INPUT -p tcp --dport 22 -j DROP
 
 ### 7.3 Hôte relay-01
 
-- Debian 13 minimal, Docker Engine et le plugin Compose v2 installés depuis les dépôts officiels Docker.
+- Ubuntu Server 26.04 LTS minimal, Docker Engine et le plugin Compose v2 installés depuis les dépôts officiels Docker.
 - Une interface `ens192` en `172.16.50.25/24`, passerelle `172.16.50.1`, résolveur `10.0.0.53`.
 - Synchronisation horaire NTP active (`systemd-timesyncd` vers `10.0.0.123`).
 - SSH par clé uniquement (`PasswordAuthentication no`, `PermitRootLogin no`), accessible depuis le bastion seulement.
@@ -555,11 +555,11 @@ administrateur ou de suspicion de fuite.
 
 ### 11.4 Mises à jour
 
-Une fois par mois, et à chaque alerte de sécurité Debian concernant Postfix ou OpenSSL :
+Une fois par mois, et à chaque alerte de sécurité Ubuntu (USN) concernant Postfix ou OpenSSL :
 
 ```bash
 cd /opt/smtp-relay && git pull
-# éventuellement : nouveau tag daté DEBIAN_TAG dans relay/Dockerfile
+# éventuellement : nouveau tag daté UBUNTU_TAG dans relay/Dockerfile
 docker compose build --pull && docker compose up -d
 ```
 

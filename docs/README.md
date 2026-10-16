@@ -42,7 +42,7 @@ fournisseur, se trouve dans [deploiement-production.md](deploiement-production.m
   - un compte SMTP (identifiant et mot de passe ou clé) ;
   - le **domaine d'expédition vérifié**, avec SPF, DKIM et DMARC publiés ;
   - l'adresse d'expédition autorisée.
-- Pour les tests : bash, et un accès aux dépôts `deb.debian.org` pendant la construction des images.
+- Pour les tests : bash, et un accès aux dépôts Ubuntu (`archive.ubuntu.com`, `security.ubuntu.com`) pendant la construction des images.
 
 ## 2. Contenu du dépôt et images
 
@@ -61,10 +61,11 @@ tests/run-tests.sh        tests d'intégration automatisés
 
 ### Images Docker
 
-Les trois images partent de `debian:trixie-20261005-slim` (Debian 13, tag
-daté et épinglé). Le tag est surchargeable avec `--build-arg DEBIAN_TAG=…`.
+Les trois images partent de `ubuntu:resolute-20260927` (Ubuntu 26.04 LTS, tag
+daté et épinglé ; les images Ubuntu officielles sont déjà minimales, il n'existe
+pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_TAG=…`.
 
-| Image | Paquets Debian | Rôle |
+| Image | Paquets Ubuntu | Rôle |
 |-------|----------------|------|
 | `relay` | `postfix`, `libsasl2-modules` (mécanismes client PLAIN/LOGIN), `ca-certificates` (vérification du certificat du fournisseur) | relai de production |
 | `test/fake-mta` | `postfix`, `sasl2-bin` (`saslpasswd2`), `libsasl2-modules`, `openssl` (PKI de test) | simule le fournisseur |
@@ -89,7 +90,7 @@ L'entrypoint enchaîne quatre étapes :
 2. **Liste blanche.** `ALLOWED_CLIENT_IPS` et `ALLOWED_CLIENT_IPS_FILE` sont fusionnés.
    - Chaque IP devient `a.b.c.d/32` ou `[v6]/128`.
    - Les notations CIDR, `0.0.0.0` et `::` sont refusées, et une liste vide aussi.
-3. **Génération de `/etc/postfix`.** `/etc/postfix` est un tmpfs (le système de fichiers racine est en lecture seule). L'entrypoint y restaure les fichiers Debian, puis génère :
+3. **Génération de `/etc/postfix`.** `/etc/postfix` est un tmpfs (le système de fichiers racine est en lecture seule). L'entrypoint y restaure les fichiers du paquet Postfix, puis génère :
    - `main.cf` et `master.cf` à partir des templates ;
    - `sender_canonical.regexp` ;
    - `sasl_passwd` (`root:root 0600`), construit à partir des Docker secrets.
@@ -204,8 +205,8 @@ Test de bout en bout depuis une machine autorisée :
 swaks --server <RELAY_BIND_ADDRESS> --port 25 --from gitlab@ci.internal --to vous@domaine.tld
 ```
 
-**Mise à jour de l'image** (par exemple vers un nouveau tag Debian daté) :
-modifier `DEBIAN_TAG`, puis lancer `docker compose up -d --build`. La file
+**Mise à jour de l'image** (par exemple vers un nouveau tag Ubuntu daté) :
+modifier `UBUNTU_TAG`, puis lancer `docker compose up -d --build`. La file
 d'attente est conservée dans le volume.
 
 ## 5. Ajouter ou retirer une application autorisée

@@ -2,14 +2,14 @@
 #
 # TEST UNIQUEMENT — simule une application (GitLab, Jenkins, inconnue) qui
 # envoie des notifications au relai avec swaks.
-ARG DEBIAN_TAG=trixie-20261005-slim
-FROM debian:${DEBIAN_TAG}
+ARG UBUNTU_TAG=resolute-20260927
+FROM ubuntu:${UBUNTU_TAG}
 # Un ARG déclaré avant FROM doit être redéclaré pour être visible ensuite.
-ARG DEBIAN_TAG
+ARG UBUNTU_TAG
 
 LABEL org.opencontainers.image.title="smtp-relay-test-client" \
       org.opencontainers.image.description="Client SMTP de test (swaks) pour le relai" \
-      org.opencontainers.image.base.name="docker.io/library/debian:${DEBIAN_TAG}"
+      org.opencontainers.image.base.name="docker.io/library/ubuntu:${UBUNTU_TAG}"
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \

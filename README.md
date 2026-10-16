@@ -1,6 +1,6 @@
 # smtp-relay
 
-Relai SMTP interne (Postfix sur Debian) pour les notifications CI/CD de GitLab CE
+Relai SMTP interne (Postfix sur Ubuntu 26.04 LTS) pour les notifications CI/CD de GitLab CE
 et Jenkins : liste blanche d'IP avec refus par défaut côté réseau privé, et
 relais en **TLS ≥ 1.2 + SASL** vers le MTA d'un fournisseur cloud.
 

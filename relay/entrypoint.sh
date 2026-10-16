@@ -132,7 +132,7 @@ configure() {
 
 generate() {
     # /etc/postfix peut être un tmpfs vide (rootfs en lecture seule) :
-    # on restaure les fichiers Debian puis on génère la configuration.
+    # on restaure les fichiers du paquet puis on génère la configuration.
     cp -a /usr/local/share/postfix-dist/. "$PF/"
     render "$TEMPLATES/main.cf.tmpl" "$PF/main.cf"
     render "$TEMPLATES/master.cf.tmpl" "$PF/master.cf"

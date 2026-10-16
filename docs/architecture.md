@@ -10,7 +10,7 @@ flowchart LR
         JK["Jenkins<br/>10.0.1.20"]
         UNK["Application inconnue<br/>10.0.1.30 (non déclarée)"]
 
-        subgraph RELAY["Conteneur relay — Postfix (Debian trixie-slim)"]
+        subgraph RELAY["Conteneur relay — Postfix (Ubuntu 26.04 LTS)"]
             direction TB
             SMTPD["smtpd :25<br/>smtpd_client_restrictions =<br/>permit_mynetworks, reject"]
             WL[/"Liste blanche mynetworks<br/>10.0.1.10/32, 10.0.1.20/32<br/>(ALLOWED_CLIENT_IPS)<br/>tout le reste : REFUS"/]

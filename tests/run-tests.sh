@@ -66,7 +66,7 @@ chmod 644 "$WORK"/secrets/*   # lisibles par le démon Docker (bind mount)
 if [[ ${SKIP_BUILD:-0} == 1 ]]; then
     info "SKIP_BUILD=1 : utilisation des images déjà présentes"
 else
-    info "Construction des images (base Debian)"
+    info "Construction des images (base Ubuntu)"
     dc build --quiet
 fi
 dc down -v --remove-orphans >/dev/null 2>&1 || true
