@@ -8,6 +8,8 @@
 # Tag daté = build reproductible ; mettre à jour volontairement (cf. docs).
 ARG DEBIAN_TAG=trixie-20261005-slim
 FROM debian:${DEBIAN_TAG}
+# Un ARG déclaré avant FROM doit être redéclaré pour être visible ensuite.
+ARG DEBIAN_TAG
 
 ARG VERSION=1.0.0
 LABEL org.opencontainers.image.title="smtp-relay" \

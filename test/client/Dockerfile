@@ -4,6 +4,8 @@
 # envoie des notifications au relai avec swaks.
 ARG DEBIAN_TAG=trixie-20261005-slim
 FROM debian:${DEBIAN_TAG}
+# Un ARG déclaré avant FROM doit être redéclaré pour être visible ensuite.
+ARG DEBIAN_TAG
 
 LABEL org.opencontainers.image.title="smtp-relay-test-client" \
       org.opencontainers.image.description="Client SMTP de test (swaks) pour le relai" \

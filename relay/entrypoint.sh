@@ -159,9 +159,9 @@ generate() {
     chmod 0600 "$PF/sasl_passwd"
     unset RELAY_SMTP_PASSWORD
 
-    # Répertoire de données (tmpfs possible) et file d'attente (volume).
+    # Répertoire de données (tmpfs possible). Les répertoires de la file
+    # (volume) sont créés/contrôlés par "postfix check" puis au démarrage.
     install -d -o postfix -g postfix -m 0700 /var/lib/postfix
-    postfix set-permissions >/dev/null 2>&1 || warn "postfix set-permissions a signalé des avertissements."
     postfix check || die "La configuration Postfix générée est invalide (postfix check)."
 }
 

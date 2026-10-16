@@ -361,6 +361,7 @@ Pour vérifier, utilisez *Tester la configuration en envoyant un email*.
 ```bash
 tests/run-tests.sh          # construit, démarre, teste, puis nettoie (docker compose down -v)
 KEEP=1 tests/run-tests.sh   # conserve la stack pour l'inspecter
+SKIP_BUILD=1 tests/run-tests.sh   # réutilise des images déjà construites (CI, registre interne)
 ```
 
 Le script lance `docker compose -p smtp-relay-test --env-file tests/test.env

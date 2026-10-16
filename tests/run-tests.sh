@@ -3,6 +3,7 @@
 #  Tests d'intégration du relai SMTP (stack docker-compose.yml + .test.yml).
 #  Usage : tests/run-tests.sh            # construit, teste, nettoie
 #          KEEP=1 tests/run-tests.sh     # conserve la stack pour inspection
+#          SKIP_BUILD=1 tests/run-tests.sh # images déjà construites (CI)
 #  Code de sortie : 0 si tous les tests sont PASS, 1 sinon.
 # =============================================================================
 set -Eeuo pipefail
@@ -62,8 +63,12 @@ printf '%s' "$(rand 24)" >"$WORK/secrets/relay_smtp_password"
 printf '%s' "wrong-$(rand 16)" >"$WORK/secrets/relay_smtp_password_bad"
 chmod 644 "$WORK"/secrets/*   # lisibles par le démon Docker (bind mount)
 
-info "Construction des images (base Debian)"
-dc build --quiet
+if [[ ${SKIP_BUILD:-0} == 1 ]]; then
+    info "SKIP_BUILD=1 : utilisation des images déjà présentes"
+else
+    info "Construction des images (base Debian)"
+    dc build --quiet
+fi
 dc down -v --remove-orphans >/dev/null 2>&1 || true
 
 info "Démarrage de la stack de test"

@@ -7,6 +7,8 @@
 #  - chaque message accepté est stocké dans /var/mail/captured/*.eml.
 ARG DEBIAN_TAG=trixie-20261005-slim
 FROM debian:${DEBIAN_TAG}
+# Un ARG déclaré avant FROM doit être redéclaré pour être visible ensuite.
+ARG DEBIAN_TAG
 
 LABEL org.opencontainers.image.title="smtp-relay-test-fake-mta" \
       org.opencontainers.image.description="Faux MTA fournisseur cloud (Postfix + TLS + SASL) pour les tests du relai" \
