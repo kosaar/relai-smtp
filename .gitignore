@@ -7,3 +7,4 @@ config/allowed_clients.txt
 
 # Artefacts de test
 tests/.work/
+tests/.logs/

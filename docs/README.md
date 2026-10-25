@@ -48,28 +48,34 @@ fournisseur, se trouve dans [deploiement-production.md](deploiement-production.m
 
 ```
 docker-compose.yml        stack de production (service relay)
-docker-compose.test.yml   surcharge de test (faux MTA, 3 clients, relai à mauvais identifiants)
+docker-compose.test.yml   surcharge de test (fournisseur simulé, poste destinataire, clients, relai à mauvais identifiants)
 relay/Dockerfile          image du relai
 relay/entrypoint.sh       validation de la configuration, génération de /etc/postfix, lancement
 relay/config/*.tmpl       templates de main.cf et master.cf
 relay/scripts/            bibliothèque commune, healthcheck, rechargement de la liste blanche
-test/fake-mta/            faux MTA fournisseur (Postfix + TLS + SASL), test uniquement
+test/provider/            fournisseur simulé (Postfix 587 TLS + SASL -> Dovecot IMAPS) et PKI de test
+test/workstation/         poste destinataire simulé (RNP, GnuPG, relève IMAPS), test uniquement
 test/client/              client swaks, test uniquement
 secrets/                  emplacement des Docker secrets (ignoré par git)
-tests/run-tests.sh        tests d'intégration automatisés
+tests/run-tests.sh        orchestrateur des tests d'intégration et de bout en bout
+tests/lib.sh              fonctions communes aux suites
+tests/suites/NN-*.sh      une suite de tests par lot
+tests/ci/lint.sh          contrôles statiques (shellcheck, Python, tests unitaires)
+.gitlab-ci.yml            CI : lint, tests d'intégration, publication de l'image
 ```
 
 ### Images Docker
 
-Les trois images partent de `ubuntu:resolute-20260927` (Ubuntu 26.04 LTS, tag
+Toutes les images partent de `ubuntu:resolute-20260927` (Ubuntu 26.04 LTS, tag
 daté et épinglé ; les images Ubuntu officielles sont déjà minimales, il n'existe
 pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_TAG=…`.
 
 | Image | Paquets Ubuntu | Rôle |
 |-------|----------------|------|
 | `relay` | `postfix`, `libsasl2-modules` (mécanismes client PLAIN/LOGIN), `ca-certificates` (vérification du certificat du fournisseur) | relai de production |
-| `test/fake-mta` | `postfix`, `sasl2-bin` (`saslpasswd2`), `libsasl2-modules`, `openssl` (PKI de test) | simule le fournisseur |
-| `test/client` | `swaks` | simule GitLab, Jenkins ou une application inconnue |
+| `test/provider` | `postfix`, `sasl2-bin` (`saslpasswd2`), `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
+| `test/workstation` | `rnp`, `gnupg`, `curl`, `openssl`, `python3` | simule le poste d'un destinataire (rôle de Thunderbird) |
+| `test/client` | `swaks`, `libnet-ssleay-perl`, `libauthen-sasl-perl`, `openssl`, `python3` | simule GitLab, Jenkins ou une application inconnue |
 
 Bonnes pratiques appliquées dans les Dockerfiles :
 
@@ -361,16 +367,31 @@ Pour vérifier, utilisez *Tester la configuration en envoyant un email*.
 
 ```bash
 tests/run-tests.sh          # construit, démarre, teste, puis nettoie (docker compose down -v)
+SUITES="00" tests/run-tests.sh   # n'exécute que les suites choisies (préfixes numériques)
 KEEP=1 tests/run-tests.sh   # conserve la stack pour l'inspecter
 SKIP_BUILD=1 tests/run-tests.sh   # réutilise des images déjà construites (CI, registre interne)
+tests/ci/lint.sh            # contrôles statiques (aussi exécutés par la CI)
 ```
+
+Les suites `tests/suites/NN-*.sh` s'exécutent dans l'ordre sur une seule stack.
+En cas d'échec, les journaux de tous les conteneurs sont copiés dans
+`tests/.logs/` (conservés comme artefact par la CI).
+
+Si Docker Hub limite le débit (HTTP 429) pendant la construction, le script
+réessaie. L'image de base peut aussi être récupérée depuis un miroir puis
+retaguée : `docker pull mirror.gcr.io/library/ubuntu:resolute-20260927 &&
+docker tag mirror.gcr.io/library/ubuntu:resolute-20260927 ubuntu:resolute-20260927`.
 
 Le script lance `docker compose -p smtp-relay-test --env-file tests/test.env
 -f docker-compose.yml -f docker-compose.test.yml`. Le relai testé est donc
 **celui de production**, surchargé uniquement par les paramètres de test.
 
-Il génère à chaque exécution des identifiants SASL aléatoires dans
-`tests/.work/` (ignoré par git).
+Il génère à chaque exécution des identifiants SASL et un mot de passe de BAL
+aléatoires dans `tests/.work/` (ignoré par git). Le service one-shot `pki`
+génère une AC de test et les certificats `provider`, `smtp-relay` et `keydir`
+dans le volume `test-pki`. Aucun composant n'est simulé par un mock : les
+messages sont livrés par un vrai Postfix dans de vraies BAL Dovecot, et relus
+en IMAPS (certificat vérifié) depuis le poste de travail.
 
 | Composant | IP | Rôle |
 |-----------|----|------|
@@ -379,7 +400,8 @@ Il génère à chaque exécution des identifiants SASL aléatoires dans
 | `client-unknown` | 10.0.1.30 | IP **non** déclarée |
 | `relay` | 10.0.1.5 / 10.0.2.5 | relai avec identifiants valides |
 | `relay-badcreds` | 10.0.1.6 / 10.0.2.6 | même image, mot de passe erroné |
-| `fake-mta` | 10.0.2.10:587 | Postfix avec STARTTLS obligatoire, SASL (sasldb), certificat signé par une AC de test, capture des mails dans des fichiers `*.eml` |
+| `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL sasldb) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
+| `workstation` | 10.0.2.50 | poste destinataire : relève les BAL en IMAPS (outil `mailbox`), RNP et GnuPG |
 
 Les deux réseaux Docker sont `internal`, sans accès à Internet.
 
@@ -387,10 +409,10 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 
 | Test | Attendu |
 |------|---------|
-| T1/T2 | un mail envoyé depuis GitLab, puis depuis Jenkins, est **reçu** par le faux MTA |
-| T3a/b/c | depuis l'IP inconnue : rejet `554 5.7.1`, rejet **tracé dans les logs** (IP + motif), aucun mail reçu |
-| T4a/b | `Return-Path` et `From:` du mail reçu valent `noreply@example.com` (nom affiché conservé) |
-| T5a–d | logs du relai : `Verified TLS connection established … TLSv1.x` et `status=sent` ; logs du faux MTA : `sasl_username=relay-test` ; en-tête `Received` du mail : `using TLSv1.x` et `Authenticated sender` |
+| T1/T2 | un message envoyé depuis GitLab, puis depuis Jenkins, est **livré** dans la BAL d'alice et relu en IMAPS |
+| T3a/b/c | depuis l'IP inconnue : rejet `554 5.7.1`, rejet **tracé dans les logs** (IP + motif), aucun message en BAL |
+| T4a/b | `Return-Path` et `From:` du message reçu valent `noreply@example.com` (nom affiché conservé) |
+| T5a–e | logs du relai : `Verified TLS connection established … TLSv1.x` et `status=sent` ; logs du fournisseur : `sasl_username=relay-test` ; en-tête `Received` du message : `using TLSv1.x` et `Authenticated sender` ; livraison LMTP tracée par Dovecot |
 | T6a–d | avec de mauvais identifiants : `SASL authentication failed`, message **en file `deferred`**, non délivré, toujours présent après redémarrage (persistance du volume) |
 | T7 | le conteneur **refuse de démarrer** si la liste est vide, contient un CIDR ou une IP invalide |
 | T8 | le healthcheck du relai est `healthy` |
@@ -405,7 +427,7 @@ rm -rf tests/.work
 
 Les réseaux de test utilisent `10.0.1.0/24` et `10.0.2.0/24`. En cas de
 conflit avec un réseau existant sur l'hôte, adaptez les sous-réseaux et les
-IP dans `docker-compose.test.yml` et dans `tests/run-tests.sh`.
+IP dans `docker-compose.test.yml` et dans `tests/suites/`.
 
 ## 9. Points de sécurité
 

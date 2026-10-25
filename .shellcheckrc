@@ -1,0 +1,4 @@
+# Configuration shellcheck du dépôt (utilisée en local et en CI).
+# SC2015 : « A && B || C » est utilisé volontairement quand B ne peut pas échouer.
+# SC1091 : les scripts du relai sourcent des chemins de l'image, pas du dépôt.
+disable=SC2015,SC1091

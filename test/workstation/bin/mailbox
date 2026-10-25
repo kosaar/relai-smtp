@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Lecture des BAL du fournisseur simulé en IMAPS (certificat vérifié).
+
+Usage :
+  mailbox fetch <bal> --match TEXTE [--wait S]   message brut (premier qui contient TEXTE)
+  mailbox count <bal> [--match TEXTE]            nombre de messages (contenant TEXTE)
+  mailbox purge <bal>                            supprime tous les messages
+
+Variables : IMAP_HOST (provider), IMAP_PORT (993), IMAP_CAFILE (/pki/ca.crt),
+MAILBOX_PASSWORD_FILE (/run/secrets/mailbox_password).
+Code de sortie : 0 si trouvé, 1 sinon, 2 en cas d'erreur IMAP/TLS.
+"""
+import argparse
+import imaplib
+import os
+import ssl
+import sys
+import time
+
+
+def connect(user: str) -> imaplib.IMAP4_SSL:
+    host = os.environ.get("IMAP_HOST", "provider")
+    port = int(os.environ.get("IMAP_PORT", "993"))
+    ctx = ssl.create_default_context(cafile=os.environ.get("IMAP_CAFILE", "/pki/ca.crt"))
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    with open(os.environ.get("MAILBOX_PASSWORD_FILE", "/run/secrets/mailbox_password")) as f:
+        password = f.read().strip()
+    imap = imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=20)
+    imap.login(user, password)
+    imap.select("INBOX")
+    return imap
+
+
+def messages(imap: imaplib.IMAP4_SSL):
+    _, data = imap.search(None, "ALL")
+    for num in data[0].split():
+        _, parts = imap.fetch(num, "(BODY.PEEK[])")
+        yield num, parts[0][1]
+
+
+def matching(user: str, match: str | None) -> list[bytes]:
+    imap = connect(user)
+    try:
+        needle = match.encode() if match else None
+        return [raw for _, raw in messages(imap) if needle is None or needle in raw]
+    finally:
+        imap.logout()
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    f = sub.add_parser("fetch")
+    f.add_argument("mailbox")
+    f.add_argument("--match", required=True)
+    f.add_argument("--wait", type=float, default=0)
+    c = sub.add_parser("count")
+    c.add_argument("mailbox")
+    c.add_argument("--match")
+    g = sub.add_parser("purge")
+    g.add_argument("mailbox")
+    a = p.parse_args()
+
+    try:
+        if a.cmd == "fetch":
+            deadline = time.monotonic() + a.wait
+            while True:
+                found = matching(a.mailbox, a.match)
+                if found:
+                    sys.stdout.buffer.write(found[0])
+                    return 0
+                if time.monotonic() >= deadline:
+                    return 1
+                time.sleep(1)
+        if a.cmd == "count":
+            print(len(matching(a.mailbox, a.match)))
+            return 0
+        if a.cmd == "purge":
+            imap = connect(a.mailbox)
+            if imap.search(None, "ALL")[1][0]:
+                imap.store("1:*", "+FLAGS", r"(\Deleted)")
+                imap.expunge()
+            imap.logout()
+            return 0
+    except (imaplib.IMAP4.error, ssl.SSLError, OSError) as e:
+        print(f"mailbox: erreur IMAPS : {e}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,15 +1,16 @@
 # =============================================================================
-#  Stack de TEST LOCAL — surcharge de docker-compose.yml (le relai testé est
-#  donc exactement celui de production, seuls les paramètres changent).
+#  Stack de TEST — surcharge de docker-compose.yml (le relai testé est donc
+#  exactement celui de production, seuls les paramètres changent).
 #  Lancée par tests/run-tests.sh :
 #    docker compose -p smtp-relay-test --env-file tests/test.env \
 #      -f docker-compose.yml -f docker-compose.test.yml up -d --build
 #
-#  Réseaux (IP fixes) :
+#  Réseaux (IP fixes, sans accès extérieur) :
 #    private  10.0.1.0/24 : client-gitlab .10, client-jenkins .20,
 #                           client-unknown .30 (NON déclaré), relay .5,
 #                           relay-badcreds .6
-#    internet 10.0.2.0/24 : relay .5, relay-badcreds .6, fake-mta .10
+#    internet 10.0.2.0/24 : relay .5, relay-badcreds .6, provider .10,
+#                           workstation .50
 # =============================================================================
 
 x-relay-test-env: &relay-test-env
@@ -17,12 +18,28 @@ x-relay-test-env: &relay-test-env
   SENDER_DOMAIN: example.com
   SENDER_ADDRESS: noreply@example.com
   SENDER_REWRITE_MODE: always
-  RELAY_HOST: fake-mta
+  RELAY_HOST: provider
   RELAY_PORT: "587"
   RELAY_TLS_SECURITY_LEVEL: secure
   RELAY_TLS_CA_FILE: /etc/test-pki/ca.crt
 
+x-depends-provider: &depends-provider
+  provider:
+    condition: service_healthy
+
 services:
+  # One-shot : PKI de test (AC + certificats provider, smtp-relay, keydir).
+  pki:
+    build: ./test/provider
+    image: smtp-relay-test/provider:latest
+    entrypoint: ["/usr/local/bin/gen-test-pki"]
+    healthcheck:
+      disable: true
+    volumes:
+      - test-pki:/pki
+    network_mode: none
+    restart: "no"
+
   relay:
     environment: *relay-test-env
     ports: !reset []
@@ -33,9 +50,7 @@ services:
         ipv4_address: 10.0.1.5
       internet:
         ipv4_address: 10.0.2.5
-    depends_on:
-      fake-mta:
-        condition: service_healthy
+    depends_on: *depends-provider
     healthcheck:
       interval: 5s
       start_period: 10s
@@ -60,53 +75,88 @@ services:
         ipv4_address: 10.0.1.6
       internet:
         ipv4_address: 10.0.2.6
-    depends_on:
-      fake-mta:
-        condition: service_healthy
+    depends_on: *depends-provider
     healthcheck:
       interval: 5s
       start_period: 10s
 
-  fake-mta:
-    build: ./test/fake-mta
-    image: smtp-relay-test/fake-mta:latest
-    hostname: fake-mta
+  # Fournisseur simulé : smarthost Postfix 587 (TLS + SASL) -> LMTP -> Dovecot (IMAPS).
+  provider:
+    build: ./test/provider
+    image: smtp-relay-test/provider:latest
+    hostname: provider
     secrets:
       - relay_smtp_username
       - relay_smtp_password
+      - mailbox_password
     volumes:
-      - test-pki:/pki
-      - fake-mta-mail:/var/mail/captured
+      - test-pki:/pki:ro
+      - provider-mail:/var/vmail
     networks:
       internet:
         ipv4_address: 10.0.2.10
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+
+  # Poste destinataire simulé (rôle de Thunderbird) : IMAPS, RNP, GnuPG.
+  workstation:
+    build: ./test/workstation
+    image: smtp-relay-test/workstation:latest
+    hostname: workstation
+    init: true
+    secrets:
+      - mailbox_password
+    volumes:
+      - test-pki:/pki:ro
+    networks:
+      internet:
+        ipv4_address: 10.0.2.50
+    depends_on:
+      pki:
+        condition: service_completed_successfully
 
   client-gitlab:
     build: ./test/client
     image: smtp-relay-test/client:latest
     hostname: gitlab
     init: true
+    volumes:
+      - test-pki:/pki:ro
     networks:
       private:
         ipv4_address: 10.0.1.10
+    depends_on:
+      pki:
+        condition: service_completed_successfully
 
   client-jenkins:
     build: ./test/client
     image: smtp-relay-test/client:latest
     hostname: jenkins
     init: true
+    volumes:
+      - test-pki:/pki:ro
     networks:
       private:
         ipv4_address: 10.0.1.20
+    depends_on:
+      pki:
+        condition: service_completed_successfully
 
   client-unknown:
     build: ./test/client
     image: smtp-relay-test/client:latest
     hostname: unknown-app
     init: true
+    volumes:
+      - test-pki:/pki:ro
     networks:
       private:
         ipv4_address: 10.0.1.30
+    depends_on:
+      pki:
+        condition: service_completed_successfully
 
 networks:
   private:
@@ -122,7 +172,7 @@ networks:
 
 volumes:
   test-pki:
-  fake-mta-mail:
+  provider-mail:
   relay-badcreds-queue:
 
 secrets:
@@ -132,3 +182,5 @@ secrets:
     file: ./tests/.work/secrets/relay_smtp_password
   relay_smtp_password_bad:
     file: ./tests/.work/secrets/relay_smtp_password_bad
+  mailbox_password:
+    file: ./tests/.work/secrets/mailbox_password

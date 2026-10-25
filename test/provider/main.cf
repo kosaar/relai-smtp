@@ -1,6 +1,8 @@
-# Faux MTA "fournisseur cloud" — TEST UNIQUEMENT.
+# Fournisseur simulé — TEST UNIQUEMENT.
+# Smarthost du fournisseur : soumission 587 (STARTTLS + SASL obligatoires),
+# livraison en LMTP dans les BAL Dovecot (lues en IMAPS par le poste de travail).
 compatibility_level = 3.6
-myhostname = fake-mta
+myhostname = smtp.provider.test
 mydomain = provider.test
 myorigin = $mydomain
 inet_interfaces = all
@@ -12,22 +14,25 @@ alias_maps =
 alias_database =
 mynetworks = 127.0.0.1/32
 
-# Tout message accepté (quel que soit le domaine) est capturé sur disque.
-default_transport = capture
-relay_transport = capture
-capture_destination_recipient_limit = 1
+# BAL hébergées (complétées par l'entrypoint à partir de PROVIDER_MAILBOXES).
+virtual_mailbox_domains =
+virtual_mailbox_maps = texthash:/etc/postfix/vmailbox
+virtual_transport = lmtp:inet:127.0.0.1:24
+# Pas d'Internet dans la stack de test : tout autre domaine est refusé.
+default_transport = error:5.1.2 domaine hors de la simulation
+relay_transport = $default_transport
 
 # TLS obligatoire avant toute commande sensible ; AUTH uniquement sous TLS.
 smtpd_tls_security_level = encrypt
 smtpd_tls_auth_only = yes
-smtpd_tls_cert_file = /pki/fake-mta.crt
-smtpd_tls_key_file = /pki/fake-mta.key
+smtpd_tls_cert_file = /pki/provider.crt
+smtpd_tls_key_file = /pki/provider.key
 smtpd_tls_protocols = >=TLSv1.2
 smtpd_tls_mandatory_protocols = >=TLSv1.2
 smtpd_tls_loglevel = 1
 smtpd_tls_received_header = yes
 
-# SASL obligatoire pour relayer.
+# SASL obligatoire pour soumettre.
 smtpd_sasl_auth_enable = yes
 smtpd_sasl_type = cyrus
 smtpd_sasl_path = smtpd

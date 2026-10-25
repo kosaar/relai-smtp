@@ -513,8 +513,8 @@ Rappels :
 | R9 | Mauvais identifiants | secret volontairement faux, puis `docker compose up -d` | `SASL authentication failed` ; message en file, non perdu |
 | R10 | Healthcheck | `docker compose ps` | `healthy` |
 
-Les tests automatisés du dépôt (`tests/run-tests.sh`) valident la logique du relai avec un faux
-peer. Cette recette, elle, valide **l'intégration réelle** : réseau, pare-feu, peer et DNS.
+Les tests automatisés du dépôt (`tests/run-tests.sh`) valident la logique du relai avec un fournisseur
+simulé (Postfix + Dovecot). Cette recette, elle, valide **l'intégration réelle** : réseau, pare-feu, peer et DNS.
 
 ---
 

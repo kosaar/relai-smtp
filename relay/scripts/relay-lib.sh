@@ -50,6 +50,7 @@ is_ipv6() {
 #
 # Résultat : variables globales MYNETWORKS (format Postfix), ALLOWED_LIST
 # (lisible) et HAS_IPV6 (0/1). Termine le processus en cas d'erreur.
+# shellcheck disable=SC2034  # variables exportées vers l'appelant (entrypoint)
 build_allowlist() {
     local raw="" entry ip
     local -a entries=() seen=() networks=()

@@ -96,7 +96,8 @@ flowchart LR
     R["relay<br/>10.0.1.5 / 10.0.2.5<br/>identifiants valides"]
     RB["relay-badcreds<br/>10.0.1.6 / 10.0.2.6<br/>mot de passe erroné"]
     subgraph I["réseau docker « internet » 10.0.2.0/24 (internal)"]
-        F["fake-mta 10.0.2.10:587<br/>Postfix + STARTTLS obligatoire<br/>+ SASL (sasldb) → *.eml"]
+        F["provider 10.0.2.10<br/>Postfix :587 STARTTLS + SASL<br/>→ LMTP → Dovecot (BAL)"]
+        W["workstation 10.0.2.50<br/>relève IMAPS · RNP · GnuPG"]
     end
     CG -- ":25 clair" --> R
     CJ -- ":25 clair" --> R
@@ -104,9 +105,11 @@ flowchart LR
     CG -- ":25" --> RB
     R == "587 TLS + SASL OK" ==> F
     RB -. "587 TLS, SASL refusé → file deferred" .-> F
+    W -- "IMAPS 993 (certificat vérifié)" --> F
 ```
 
-La PKI de test (AC + certificat `fake-mta`) est générée par le faux MTA dans
-le volume `test-pki`, monté en lecture seule dans le relai
+La PKI de test (AC + certificats `provider`, `smtp-relay`, `keydir`) est
+générée par le service one-shot `pki` dans le volume `test-pki`, monté en
+lecture seule dans les autres conteneurs, dont le relai
 (`RELAY_TLS_CA_FILE`) : le mode `secure` (vérification du certificat et du nom)
 est donc réellement exercé.
