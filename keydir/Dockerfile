@@ -31,7 +31,8 @@ COPY --chmod=0755 keydir/entrypoint.sh /usr/local/bin/keydir-entrypoint
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 VOLUME ["/var/lib/keydir"]
-EXPOSE 8443
+# 8443 : HTTPS (postes, passerelle) ; 9155 : métriques, réseau interne seulement.
+EXPOSE 8443 9155
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/keydir-healthcheck"]

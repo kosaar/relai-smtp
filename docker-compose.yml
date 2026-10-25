@@ -54,6 +54,10 @@ services:
       RELAY_TLS_SECURITY_LEVEL: ${RELAY_TLS_SECURITY_LEVEL:-secure}
       RELAY_SASL_MECHANISMS: ${RELAY_SASL_MECHANISMS:-plain, login}
       QUEUE_LIFETIME: ${QUEUE_LIFETIME:-5d}
+      # --- Supervision : exporteur Prometheus (port 9154) ; les métriques de
+      #     l'annuaire (clés) sont lues sur son port interne et recopiées.
+      RELAY_METRICS_PROBE_INTERVAL: ${RELAY_METRICS_PROBE_INTERVAL:-300}
+      RELAY_KEYDIR_METRICS_URL: http://keydir:9155/metrics
       TZ: ${TZ:-UTC}
     secrets:
       - relay_smtp_username
@@ -62,8 +66,11 @@ services:
       - relay_tls_key
     ports:
       # Publier UNIQUEMENT sur l'IP privée de l'hôte (VLAN Services), jamais sur
-      # une interface publique. Seul le port de soumission 587 existe.
+      # une interface publique. Le seul port SMTP est la soumission 587.
       - "${RELAY_BIND_ADDRESS:?RELAY_BIND_ADDRESS doit contenir l'IP privée de l'hôte}:${RELAY_PUBLISHED_PORT:-587}:587"
+      # Métriques Prometheus : par défaut sur la boucle locale de l'hôte ; mettre
+      # l'IP du VLAN de supervision dans RELAY_METRICS_BIND_ADDRESS.
+      - "${RELAY_METRICS_BIND_ADDRESS:-127.0.0.1}:${RELAY_METRICS_PUBLISHED_PORT:-9154}:9154"
     volumes:
       - relay-queue:/var/spool/postfix
       - ./config:/etc/relay:ro
@@ -166,6 +173,10 @@ services:
     environment:
       KEYDIR_DOMAINS: ${KEYDIR_DOMAINS:?KEYDIR_DOMAINS doit lister les domaines publiés par l'annuaire}
       KEYDIR_AUDIT_RETENTION_DAYS: ${KEYDIR_AUDIT_RETENTION_DAYS:-365}
+      # Clés signalées « proches de l'expiration » (métriques, port interne 9155
+      # non publié, lu par l'exporteur du relai).
+      KEYDIR_EXPIRY_WARNING_DAYS: ${KEYDIR_EXPIRY_WARNING_DAYS:-30}
+      KEYDIR_METRICS_LISTEN: 0.0.0.0:9155
       TZ: ${TZ:-UTC}
     secrets:
       - keydir_tls_cert

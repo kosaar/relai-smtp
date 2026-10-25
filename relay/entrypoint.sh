@@ -5,7 +5,8 @@
 #  2. lit et valide le reste de la configuration (environnement + secrets) ;
 #  3. génère /etc/postfix (main.cf, master.cf, base SASL des applications,
 #     sender_login_maps, mynetworks, certificat, identifiants du fournisseur) ;
-#  4. lance Postfix au premier plan ("postfix start-fg", logs sur stdout).
+#  4. lance Postfix au premier plan ("postfix start-fg", logs sur stdout) sous
+#     relay-run, qui alimente l'exporteur de métriques Prometheus.
 #  Toute valeur absente ou invalide => arrêt immédiat (code 1), jamais de
 #  fonctionnement dégradé ou "ouvert".
 # =============================================================================
@@ -161,6 +162,22 @@ print(s.getsockname()[0])' "$GATEWAY_IP") || die "aucune route vers la passerell
 
     INET_PROTOCOLS=${RELAY_INET_PROTOCOLS:-ipv4}
     [[ $INET_PROTOCOLS =~ ^(ipv4|ipv6|all)$ ]] || die "RELAY_INET_PROTOCOLS='${INET_PROTOCOLS}' invalide."
+
+    # ---- Exporteur de métriques (lancé par relay-run, utilisateur nobody)
+    RELAY_METRICS_ENABLED=${RELAY_METRICS_ENABLED:-yes}
+    [[ $RELAY_METRICS_ENABLED =~ ^(yes|no)$ ]] || die "RELAY_METRICS_ENABLED='${RELAY_METRICS_ENABLED}' invalide (yes | no)."
+    RELAY_METRICS_LISTEN=${RELAY_METRICS_LISTEN:-0.0.0.0:9154}
+    local mport=${RELAY_METRICS_LISTEN##*:}
+    [[ $RELAY_METRICS_LISTEN =~ ^[0-9.]+:[0-9]{1,5}$ ]] && is_port "$mport" \
+        && [[ $mport != 587 && $mport != "$REINJECT_PORT" ]] \
+        || die "RELAY_METRICS_LISTEN='${RELAY_METRICS_LISTEN}' invalide (ex. 0.0.0.0:9154)."
+    RELAY_METRICS_PROBE_INTERVAL=${RELAY_METRICS_PROBE_INTERVAL:-300}
+    [[ $RELAY_METRICS_PROBE_INTERVAL =~ ^[0-9]+$ ]] && (( RELAY_METRICS_PROBE_INTERVAL >= 5 && RELAY_METRICS_PROBE_INTERVAL <= 86400 )) \
+        || die "RELAY_METRICS_PROBE_INTERVAL='${RELAY_METRICS_PROBE_INTERVAL}' invalide (secondes, de 5 à 86400)."
+    RELAY_KEYDIR_METRICS_URL=${RELAY_KEYDIR_METRICS_URL-http://keydir:9155/metrics}
+    [[ -z $RELAY_KEYDIR_METRICS_URL || $RELAY_KEYDIR_METRICS_URL =~ ^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9._/-]*$ ]] \
+        || die "RELAY_KEYDIR_METRICS_URL='${RELAY_KEYDIR_METRICS_URL}' invalide (ex. http://keydir:9155/metrics, vide = désactivé)."
+    export RELAY_METRICS_ENABLED RELAY_METRICS_LISTEN RELAY_METRICS_PROBE_INTERVAL RELAY_KEYDIR_METRICS_URL
 }
 
 generate() {
@@ -211,6 +228,11 @@ summary() {
     log "Passerelle : milter ${RELAY_MILTER}, filtre avant file ${RELAY_PROXY_FILTER} (injoignable => 4xx, rien n'est accepté)"
     log "Réinjection des messages chiffrés : ${REINJECT_ADDRESS}:${REINJECT_PORT}, depuis ${GATEWAY_IP} uniquement"
     log "Relayhost : [${RELAY_HOST}]:${RELAY_PORT} TLS=${RELAY_TLS_SECURITY_LEVEL} wrappermode=${RELAY_TLS_WRAPPERMODE} >=TLSv1.2, SASL user=${RELAY_SMTP_USERNAME}"
+    if [[ $RELAY_METRICS_ENABLED == yes ]]; then
+        log "Métriques Prometheus : http://${RELAY_METRICS_LISTEN}/metrics (sonde du smarthost toutes les ${RELAY_METRICS_PROBE_INTERVAL} s)"
+    else
+        log "Métriques Prometheus désactivées (RELAY_METRICS_ENABLED=no)"
+    fi
 }
 
 configure
@@ -218,6 +240,9 @@ generate
 summary
 
 if [[ ${1:-} == postfix && ${2:-} == start-fg ]]; then
+    # relay-run : Postfix au premier plan, journaux recopiés sur la sortie
+    # standard et transmis à l'exporteur de métriques.
     log "Démarrage de Postfix au premier plan."
+    exec relay-run -- "$@"
 fi
 exec "$@"

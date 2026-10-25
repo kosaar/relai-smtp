@@ -1,7 +1,7 @@
 # Plan d'implémentation : relais SMTP applicatif chiffrant (OpenPGP)
 
 > Statut : **validé le 2026-10-25 (toutes les décisions D1 à D12 acceptées)**. Implémentation lot par lot, un commit poussé par lot.
-> Avancement : lots 0 à 4 et 6 terminés ; lot 5 (quotas) non réalisé, à la demande.
+> Avancement : lots 0 à 4, 6 et 7 terminés ; lot 5 (quotas) non réalisé, à la demande.
 > Base : branche `claude/vigilant-mccarthy-kgzh0e` (relai Postfix, liste blanche IP,
 > TLS + SASL vers le fournisseur, 19 tests d'intégration verts).
 > Branche de travail : `claude/gallant-shannon-7yirrk`.
@@ -233,6 +233,11 @@ dépassements de quota.
   échecs d'authentification, dépassements de quota, blocages de contenu, clés
   proches de l'expiration ou révoquées, joignabilité et expiration du certificat
   du smarthost.
+- **Réalisé** : `relay-run` (PID 1 du relai) lance Postfix, recopie ses
+  journaux et en transmet une copie non bloquante à `relay-exporter` (port
+  9154, utilisateur `nobody`), qui y ajoute la file (`postqueue -j`), une sonde
+  TLS du smarthost et les métriques des clés lues sur le port interne 9155 de
+  l'annuaire. Dépassements de quota : sans objet (lot 5 non réalisé).
 
 | Test | Attendu |
 |---|---|
@@ -264,5 +269,5 @@ dépassements de quota.
 | Destinataires masqués et RNP | RNP 0.18 n'essaie que le premier destinataire masqué : identifiants masqués réservés aux messages à destinataire unique (D4). Recette : vérifier dans Thunderbird le déchiffrement d'un message à destinataire unique (identifiant masqué) et d'un message à plusieurs destinataires |
 | Taille du message chiffré | L'armure ASCII grossit le message : `cleanup` accepte 1,5 × `MESSAGE_SIZE_LIMIT` (la limite annoncée aux applications reste `MESSAGE_SIZE_LIMIT`) ; la limite du fournisseur doit être au moins égale à 1,5 × `MESSAGE_SIZE_LIMIT` |
 | Robustesse de `python3-milter` | Paquet Ubuntu maintenu ; le contenu passe depuis le lot 4 par `smtpd_proxy_filter` (le milter ne garantissait pas l'absence de clair dans la file), le milter ne sert plus qu'aux contrôles d'enveloppe |
-| Lecture des logs Postfix par l'exporteur | Prototype dès le lot 7 (FIFO ou fichier tmpfs relu) avant d'en dépendre |
+| Lecture des logs Postfix par l'exporteur | **Retenu au lot 7** : `relay-run` (PID 1) lance Postfix avec sa sortie sur un tube, recopie les journaux sur stdout et en donne une copie non bloquante à l'exporteur (aucune FIFO ni fichier, rien ne peut bloquer Postfix) |
 | Limite de débit Docker Hub pendant les constructions | Images de base mises en cache, nouvelles tentatives |

@@ -27,6 +27,7 @@ x-relay-test-env: &relay-test-env
   RELAY_TLS_KEY_FILE: /etc/test-pki/smtp-relay.key
   RELAY_AUTH_RATE_LIMIT: "1000"
   MESSAGE_SIZE_LIMIT: "5242880"
+  RELAY_METRICS_PROBE_INTERVAL: "5"
 
 x-depends-relay: &depends-relay
   provider:

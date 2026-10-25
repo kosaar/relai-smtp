@@ -1,4 +1,5 @@
-"""Serveur HTTPS de l'annuaire (TLS >= 1.2 uniquement, aucun port en clair).
+"""Serveur HTTPS de l'annuaire (TLS >= 1.2 uniquement ; seules les métriques, sur un
+port interne non publié, sont en clair).
 
   POST /api/v1/keys?email=<adresse>    dépôt d'une clé publique (=> pending)
                                        ou d'un certificat de révocation (appliqué immédiatement)
@@ -6,6 +7,9 @@
   GET  /.well-known/openpgpkey/<domaine>/hu/<hachage>[?l=<local>]   WKD (méthode avancée)
   GET  /.well-known/openpgpkey/<domaine>/policy                      WKD : fichier de politique
   GET  /healthz                        sonde de santé
+
+Port interne séparé, en HTTP, non publié (KEYDIR_METRICS_LISTEN) :
+  GET  /metrics                        métriques Prometheus (état des clés, keydir.metrics)
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from keydir import config as config_mod
+from keydir import metrics as metrics_mod
 from pgpkeys import openpgp, policy
 from keydir.store import Store, StoreError
 
@@ -174,6 +179,39 @@ class App:
                       {"email": email, "fingerprint": info.fingerprint, "state": state})
 
 
+class MetricsHandler(BaseHTTPRequestHandler):
+    server_version = "keydir"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):   # pas de journal d'accès (lectures périodiques)
+        pass
+
+    def do_GET(self):
+        app = self.server.app
+        if self.path.split("?", 1)[0] != "/metrics":
+            body, code = b"not found\n", 404
+        else:
+            try:
+                body = metrics_mod.render(app.store.keys(), int(time.time()),
+                                          app.config.expiry_warning_days).encode()
+                code = 200
+            except Exception as e:   # noqa: BLE001
+                log.warning("metrics failed: %s", type(e).__name__)
+                body, code = b"error\n", 500
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def start_metrics(app: App) -> None:
+    srv = ThreadingHTTPServer(app.config.metrics_listen, MetricsHandler)
+    srv.daemon_threads = True
+    srv.app = app
+    threading.Thread(target=srv.serve_forever, daemon=True, name="metrics").start()
+
+
 def purge_loop(app: App):
     while True:
         try:
@@ -201,6 +239,10 @@ def main() -> int:
     srv = TLSServer(app)
     log.info("annuaire HTTPS (TLS >= 1.2) sur %s:%d, domaines : %s, rétention de l'audit : %d jours",
              cfg.host, cfg.port, " ".join(sorted(cfg.domains)), cfg.audit_retention_days)
+    if cfg.metrics_listen:
+        start_metrics(app)
+        log.info("métriques (HTTP, réseau interne) sur %s:%d/metrics, alerte d'expiration à %d jours",
+                 *cfg.metrics_listen, cfg.expiry_warning_days)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

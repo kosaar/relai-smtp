@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+# Processus principal du relai : Postfix + exporteur de métriques. Voir relayexp/supervisor.py.
+import sys
+
+sys.path.insert(0, "/opt/relay/lib")
+from relayexp.supervisor import main  # noqa: E402
+
+sys.exit(main())

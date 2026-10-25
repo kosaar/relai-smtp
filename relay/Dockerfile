@@ -5,7 +5,8 @@
 #    identifiant par application (inventaire config/applications.toml) ;
 #  - chaque login n'envoie qu'avec son adresse (enveloppe ici, From: dans la
 #    passerelle appelée en milter avant la mise en file) ;
-#  - sortie vers le smarthost du fournisseur en TLS vérifié + SASL.
+#  - sortie vers le smarthost du fournisseur en TLS vérifié + SASL ;
+#  - exporteur de métriques Prometheus (relay-run : processus principal).
 # Aucune configuration ni secret n'est figé dans l'image : tout est généré au
 # démarrage par entrypoint.sh. Contexte de construction : racine du dépôt.
 
@@ -48,10 +49,16 @@ COPY --chmod=0644 relay/scripts/relay-lib.sh /usr/local/lib/relay-lib.sh
 COPY --chmod=0755 relay/scripts/relay-healthcheck.sh /usr/local/bin/relay-healthcheck
 COPY common/relaycfg/ /opt/relay/lib/relaycfg/
 COPY --chmod=0755 common/bin/relay-config /usr/local/bin/relay-config
+# Processus principal (Postfix + copie des journaux) et exporteur de métriques.
+COPY relay/exporter/relayexp/ /opt/relay/lib/relayexp/
+COPY --chmod=0755 relay/bin/relay-run relay/bin/relay-exporter /usr/local/bin/
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 # File d'attente persistante (à monter sur un volume nommé).
 VOLUME ["/var/spool/postfix"]
-EXPOSE 587
+# 587 : soumission ; 9154 : métriques Prometheus (exporteur).
+EXPOSE 587 9154
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/usr/local/bin/relay-healthcheck"]

@@ -73,6 +73,14 @@ queue_file_raw() {
         [ -n "$f" ] && cat "$f"' _ "$2"
 }
 
+# metrics [relai] : métriques Prometheus de l'exporteur du relai (GET /metrics).
+metrics() {
+    dc exec -T "${1:-relay}" python3 -c 'import urllib.request
+print(urllib.request.urlopen("http://127.0.0.1:9154/metrics", timeout=30).read().decode(), end="")'
+}
+# metric <métriques> <série exacte, ex. a_total{app="x"}> : valeur (0 si absente).
+metric() { awk -v s="$2" '$1 == s { v = $2 } END { print (v == "" ? 0 : v) }' <<<"$1"; }
+
 # ws <commande…> : commande sur le poste de travail.
 ws() { dc exec -T workstation "$@"; }
 

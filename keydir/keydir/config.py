@@ -25,6 +25,8 @@ class Config:
     domains: frozenset[str]
     audit_retention_days: int
     max_key_size: int
+    metrics_listen: tuple[str, int] | None = None
+    expiry_warning_days: int = 30
 
 
 def _int(env, name, default, lo, hi, errors):
@@ -49,6 +51,16 @@ def load(env=os.environ) -> Config:
         if not DOMAIN_RE.match(d):
             errors.append(f"KEYDIR_DOMAINS : '{d}' n'est pas un nom de domaine valide.")
     retention = _int(env, "KEYDIR_AUDIT_RETENTION_DAYS", 365, 1, 3650, errors)
+    warning_days = _int(env, "KEYDIR_EXPIRY_WARNING_DAYS", 30, 1, 365, errors)
+    # Métriques (HTTP, port interne non publié) ; vide = désactivées.
+    metrics_raw = env.get("KEYDIR_METRICS_LISTEN", "0.0.0.0:9155")
+    metrics_listen = None
+    if metrics_raw:
+        mhost, _, mport = metrics_raw.rpartition(":")
+        if not mhost or not mport.isdigit() or not 1 <= int(mport) <= 65535 or mport == port:
+            errors.append(f"KEYDIR_METRICS_LISTEN='{metrics_raw}' invalide (ex. 0.0.0.0:9155, vide = désactivé).")
+        else:
+            metrics_listen = (mhost, int(mport))
     max_size = _int(env, "KEYDIR_MAX_KEY_SIZE", 65536, 1024, 1048576, errors)
     cert = env.get("KEYDIR_TLS_CERT", "/run/keydir/tls/cert.pem")
     key = env.get("KEYDIR_TLS_KEY", "/run/keydir/tls/key.pem")
@@ -59,7 +71,7 @@ def load(env=os.environ) -> Config:
     if errors:
         raise ConfigError(errors)
     return Config(host, int(port), cert, key, env.get("KEYDIR_DB", "/var/lib/keydir/keydir.db"),
-                  domains, retention, max_size)
+                  domains, retention, max_size, metrics_listen, warning_days)
 
 
 def tls_context(cert: str, key: str) -> ssl.SSLContext:

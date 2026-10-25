@@ -1,10 +1,10 @@
 # Architecture du relai SMTP
 
-> État actuel : lots 1 à 4 et 6 du [plan d'implémentation](plan-implementation.md)
+> État actuel : lots 1 à 4, 6 et 7 du [plan d'implémentation](plan-implementation.md)
 > (soumission 587 authentifiée, identité par application, annuaire de clés,
 > chiffrement OpenPGP dans la passerelle avant la mise en file, nettoyage des
-> en-têtes, contrôle du contenu). Les quotas (lot 5) ne sont pas réalisés ;
-> les lots suivants ajoutent la supervision.
+> en-têtes, contrôle du contenu, supervision). Les quotas (lot 5) ne sont pas
+> réalisés ; le lot 8 finalise l'exploitation et la documentation.
 
 ## Vue d'ensemble
 
@@ -27,13 +27,16 @@ flowchart LR
             Q[("Volume relay-queue<br/>(chiffré uniquement)")]
             SMTP["client smtp<br/>relayhost = [fournisseur]:587<br/>Received du relai retiré"]
             INV{{"config/applications.toml<br/>secrets/apps/&lt;nom&gt;"}}
+            EXP["exporteur :9154 (nobody)<br/>journaux (relay-run), postqueue -j,<br/>sonde TLS du smarthost"]
             SMTPD --> ACL
             RI --> Q --> SMTP
             INV -. "relay-config<br/>(au démarrage)" .-> ACL
+            Q -.-> EXP
         end
         GW["Conteneur gateway (Python)<br/>milter :9900 : login ↔ IP, clé du destinataire (WKD)<br/>filtre avant file :10025 : From:, contrôle du contenu, chiffrement PGP/MIME,<br/>en-têtes en liste blanche, Message-ID pseudonymisés"]
-        KD["Conteneur keydir<br/>HTTPS :8443 (TLS ≥ 1.2)<br/>dépôt · validation admin<br/>WKD · révocations · audit"]
+        KD["Conteneur keydir<br/>HTTPS :8443 (TLS ≥ 1.2)<br/>dépôt · validation admin<br/>WKD · révocations · audit<br/>métriques :9155 (interne)"]
     end
+    PROM["Prometheus<br/>(VLAN supervision)"]
 
     TB["Poste (Thunderbird)<br/>clé privée locale"]
 
@@ -48,6 +51,8 @@ flowchart LR
     SMTP == "587/465 TLS ≥ 1.2 vérifié<br/>AUTH SASL" ==> MTA
     TB -- "HTTPS : dépôt de clé,<br/>WKD (openpgpkey.example.com)" --> KD
     GW -- "HTTPS : WKD (cache)" --> KD
+    EXP -. "HTTP :9155 (backend)" .-> KD
+    PROM -- "HTTP :9154 /metrics" --> EXP
 
     classDef deny fill:#fde2e2,stroke:#c0392b,color:#7b1d1d;
     classDef ok fill:#e3f4e8,stroke:#2e8b57,color:#1b4d2e;
@@ -72,6 +77,9 @@ que sur le port 587 et n'est pas joignable depuis Internet.
 | 3b | Passerelle → annuaire | 8443/tcp (réseau `backend` interne) | HTTPS, TLS ≥ 1.2, certificat vérifié | — | WKD ; annuaire injoignable ⇒ `451 4.7.1` (échec fermé) |
 | 4 | Relai → smarthost | 587/tcp (STARTTLS) ou 465/tcp | **TLS ≥ 1.2**, certificat vérifié (`secure`) | **SASL** (secrets) | `smtp_tls_security_level` |
 | 5 | Poste → annuaire | 443/tcp (8443 dans le conteneur) | **HTTPS**, TLS ≥ 1.2, aucun port en clair | aucune (dépôt public) | clé publiée seulement après validation de l'empreinte par un administrateur ; révocation par certificat signé |
+| 6 | Prometheus → relai (F4) | 9154/tcp (publié sur `RELAY_METRICS_BIND_ADDRESS`, `127.0.0.1` par défaut) | — (métadonnées) | — (filtrage réseau) | port à n'ouvrir qu'au serveur Prometheus |
+| 6a | Relai (exporteur) → annuaire | 9155/tcp (réseau `backend` interne, non publié) | — (réseau Docker interne) | — | état des clés seulement (expiration, révocation), aucune donnée de clé |
+| 6b | Relai (exporteur) → smarthost | comme le flux 4 | TLS ≥ 1.2, certificat vérifié | aucune (EHLO, STARTTLS, QUIT) | sonde périodique (`RELAY_METRICS_PROBE_INTERVAL`) : joignabilité et expiration du certificat |
 
 ## Traitement d'un message
 
@@ -151,3 +159,31 @@ générée par le service one-shot `pki` dans le volume `test-pki`, monté en
 lecture seule dans les autres conteneurs. Les clients vérifient le certificat
 de `smtp-relay`, le relai vérifie celui du fournisseur (`secure`), le poste de
 travail celui de l'IMAPS : toutes les vérifications TLS sont réellement exercées.
+
+## Supervision et journaux
+
+```mermaid
+flowchart LR
+    subgraph RELAY["Conteneur relay"]
+        RUN["relay-run (PID 1, root)"]
+        PF["Postfix (master -s)<br/>maillog_file = /dev/stdout"]
+        EX["relay-exporter (nobody, groupe postdrop)<br/>HTTP :9154"]
+        PF -- "journaux (tube)" --> RUN
+        RUN -- "copie non bloquante" --> EX
+        EX -- "postqueue -j" --> PF
+    end
+    RUN -- "stdout (inchangé)" --> DL["logs Docker<br/>(rotation 5 × 10 Mo)"]
+    EX -- "HTTP :9155" --> KD["keydir (métriques des clés)"]
+    EX -- "TLS : EHLO, STARTTLS, QUIT" --> SH["smarthost"]
+    P["Prometheus"] -- "GET /metrics" --> EX
+```
+
+- **Aucun contenu dans les journaux** : Postfix, la passerelle et l'annuaire ne
+  journalisent que des métadonnées (enveloppe, codes, identifiant de règle) ;
+  IT7.5 le vérifie sur tous les conteneurs de la stack de test.
+- **Aucun journal persistant dans les conteneurs** : tout part sur la sortie
+  standard (rotation Docker) ; l'export syslog TLS (F5) se configure au niveau
+  du démon Docker ou d'un collecteur, hors du dépôt.
+- **L'exporteur ne bloque jamais le courrier** : `relay-run` lui donne une
+  copie non bloquante des journaux (lignes perdues pour les métriques seulement
+  en cas de retard) et le relance s'il s'arrête.

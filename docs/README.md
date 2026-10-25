@@ -25,7 +25,7 @@ GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Post
 ```
 
 > **Version 2 (en cours) :** le relai évolue vers un relai **chiffrant** (OpenPGP,
-> annuaire de clés, contrôle du contenu ; quotas non réalisés), lot par lot, selon
+> annuaire de clés, contrôle du contenu, supervision ; quotas non réalisés), lot par lot, selon
 > [plan-implementation.md](plan-implementation.md). Ce document décrit l'état
 > actuel. Le schéma détaillé se trouve dans [architecture.md](architecture.md).
 > Le guide [deploiement-production.md](deploiement-production.md) décrit encore
@@ -74,6 +74,7 @@ relay/Dockerfile          image du relai (contexte de construction : racine du d
 relay/entrypoint.sh       validation de la configuration, génération de /etc/postfix, lancement
 relay/config/*.tmpl       templates de main.cf, master.cf et de la configuration SASL
 relay/scripts/            bibliothèque commune, healthcheck
+relay/exporter/relayexp/  processus principal relay-run (Postfix + journaux) et exporteur Prometheus
 gateway/                  passerelle Python appelée par Postfix avant la mise en file (milter + filtre SMTP)
 keydir/                   annuaire de clés publiques OpenPGP (dépôt HTTPS, validation, WKD, révocations)
 test/provider/            fournisseur simulé (Postfix 587 TLS + SASL -> Dovecot IMAPS) et PKI de test
@@ -97,7 +98,7 @@ pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_T
 
 | Image | Paquets Ubuntu | Rôle |
 |-------|----------------|------|
-| `relay` | `postfix`, `libsasl2-modules` (PLAIN/LOGIN), `libsasl2-modules-db` et `sasl2-bin` (base SASL des applications), `python3` (`relay-config`), `ca-certificates` | relai de production |
+| `relay` | `postfix`, `libsasl2-modules` (PLAIN/LOGIN), `libsasl2-modules-db` et `sasl2-bin` (base SASL des applications), `python3` (`relay-config`, `relay-run`, exporteur de métriques), `ca-certificates` | relai de production |
 | `gateway` | `python3`, `python3-milter`, `gpg` (chiffrement, clés publiques seulement), `ca-certificates` | passerelle de production (milter et filtre avant file), exécutée sous un utilisateur non privilégié |
 | `keydir` | `python3` (serveur HTTPS, SQLite), `gpg` (lecture des clés publiques) | annuaire de clés de production, exécuté sous un utilisateur non privilégié |
 | `test/provider` | `postfix`, `sasl2-bin`, `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
@@ -119,13 +120,13 @@ Bonnes pratiques appliquées dans les Dockerfiles :
 ### Entrypoint du relai (`relay/entrypoint.sh`)
 
 1. **Inventaire.** `relay-config check` valide `config/applications.toml` et les secrets des applications (voir section 3). La moindre erreur arrête le conteneur (code 1) avec des lignes `FATAL: …`, toutes les erreurs étant listées ensemble.
-2. **Reste de la configuration.** Certificat de soumission (lisible, clé correspondante), passerelle (son adresse est résolue au démarrage : le port de réinjection n'accepte qu'elle), fournisseur, niveau TLS, taille maximale, durée de file. Le relai ne démarre jamais en mode dégradé ou ouvert.
+2. **Reste de la configuration.** Certificat de soumission (lisible, clé correspondante), passerelle (son adresse est résolue au démarrage : le port de réinjection n'accepte qu'elle), fournisseur, niveau TLS, taille maximale, durée de file, exporteur de métriques. Le relai ne démarre jamais en mode dégradé ou ouvert.
 3. **Génération de `/etc/postfix`** (tmpfs, le système de fichiers racine est en lecture seule) :
    - `main.cf` et `master.cf` à partir des templates ;
    - `relay-config postfix` génère `sender_login_maps` (adresse → login), `mynetworks` (IP de l'inventaire, en `/32` ou `/128`) et la base SASL `sasl/sasldb2` (`root:postfix 0640`), **reconstruite à chaque démarrage** ;
    - `tls/submission.pem` (clé + chaîne, `0600`) ;
    - `sasl_passwd` (`root:root 0600`), identifiants du fournisseur.
-4. **Démarrage.** `postfix check`, puis `exec postfix start-fg`. Postfix tourne en PID 1 et ses logs partent sur stdout.
+4. **Démarrage.** `postfix check`, puis `exec relay-run -- postfix start-fg`. `relay-run` (PID 1) lance Postfix au premier plan, recopie ses logs sur stdout (inchangés, `docker logs`) et en transmet une copie à l'exporteur de métriques, qu'il lance sous `nobody` et relance s'il s'arrête. La copie est non bloquante : un exporteur lent ou arrêté ne retarde jamais les logs ni le courrier. `relay-run` relaie `SIGTERM` au processus maître Postfix et se termine avec son code.
 
 ### Passerelle (`gateway/`)
 
@@ -237,7 +238,8 @@ est validé dans l'inventaire mais n'est pas appliqué.
 
 ### Annuaire de clés (`keydir/`)
 
-Service HTTPS (TLS ≥ 1.2 uniquement, aucun port en clair) qui conserve les clés
+Service HTTPS (TLS ≥ 1.2 uniquement ; seul le port interne des métriques, non
+publié, est en HTTP) qui conserve les clés
 publiques des destinataires (SQLite, volume `keydir-data`) :
 
 | Requête | Rôle |
@@ -273,6 +275,54 @@ docker compose exec keydir keydir-admin audit
   l'apprennent ; elle ne peut plus être utilisée pour chiffrer.
 - **Journal d'audit** (dépôts, refus, validations, révocations, suppressions) :
   métadonnées seulement, purgé au-delà de `KEYDIR_AUDIT_RETENTION_DAYS` jours.
+
+### Supervision (exporteur Prometheus)
+
+Le relai expose ses métriques sur `http://<hôte>:9154/metrics` (publié par
+défaut sur `127.0.0.1` de l'hôte ; `RELAY_METRICS_BIND_ADDRESS` pour un
+Prometheus du VLAN de supervision). L'exporteur s'exécute sous `nobody`, sans
+capacité, et ne lit que des métadonnées :
+
+- les **logs Postfix**, que `relay-run` lui transmet ;
+- la **file**, avec `postqueue -j` (groupe `postdrop`) ;
+- le **smarthost**, par une connexion TLS périodique : EHLO, STARTTLS et QUIT, sans authentification ni message ;
+- les **métriques de l'annuaire**, lues sur son port interne 9155 (réseau `backend`, non publié) et recopiées : Prometheus n'a qu'une cible.
+
+| Métrique | Signification |
+|----------|---------------|
+| `relay_queue_messages{queue}` | messages en file (`active`, `deferred`, `hold`, `incoming`, `maildrop`) |
+| `relay_queue_oldest_message_age_seconds` | âge du plus ancien message en file (0 si vide) |
+| `relay_rejects_total{app,reason,class}` | refus par application (login SASL, sinon adresse, sinon IP) et motif : `no_key`, `keydir_unavailable`, `content`, `client_host`, `client_ip_mismatch`, `envelope_sender`, `header_from`, `auth_required`, `size`, `gateway_unavailable`, `encryption_error`… ; `class` = `permanent` (5xx) ou `temporary` (4xx) |
+| `relay_nokey_rejects_total{recipient}` | destinataires refusés faute de clé valide (1000 adresses au plus, au-delà `other`) |
+| `relay_auth_failures_total{app}` | échecs d'authentification SASL, par application d'après l'IP du client |
+| `relay_content_blocks_total{app,rule}` | messages bloqués par le contrôle du contenu, par règle |
+| `relay_deliveries_total{app,status}` | tentatives de livraison au smarthost : `sent`, `deferred`, `bounced`, `expired` |
+| `relay_deferrals_total{app,reason}` | différés par motif : `auth`, `tls`, `dns`, `connection`, `remote_temporary`, `other` |
+| `relay_smarthost_up`, `relay_smarthost_tls_verified` | smarthost joignable en TLS ; certificat valide pour l'AC (`RELAY_TLS_CA_FILE`) et le nom configurés |
+| `relay_smarthost_certificate_expiry_timestamp_seconds` | expiration du certificat du smarthost (lue même si le certificat est refusé) |
+| `keydir_keys_expiring_soon`, `keydir_key_expiring_soon{email}` | clés publiées expirant dans `KEYDIR_EXPIRY_WARNING_DAYS` jours (30) |
+| `keydir_keys_expired`, `keydir_key_expired{email}` | clés publiées expirées (destinataires refusés) |
+| `keydir_keys_revoked`, `keydir_key_revoked{email}` | adresses dont la clé est révoquée, sans clé de remplacement validée |
+| `keydir_keys{state}`, `keydir_key_expiry_timestamp_seconds{email}` | clés par état (dont `pending` : en attente de validation) ; expiration de chaque clé publiée |
+| `relay_queue_scrape_ok`, `relay_keydir_metrics_up` | lecture de la file et de l'annuaire réussie |
+
+Exemples d'alertes (PromQL) :
+
+```
+relay_queue_oldest_message_age_seconds > 3600          # messages bloqués depuis plus d'une heure
+relay_smarthost_up == 0 or relay_smarthost_tls_verified == 0
+relay_smarthost_certificate_expiry_timestamp_seconds - time() < 14 * 86400
+increase(relay_auth_failures_total[15m]) > 10          # essais de mots de passe
+increase(relay_content_blocks_total[1h]) > 0           # une application tente d'envoyer un secret
+keydir_keys_expiring_soon > 0 or keydir_keys_expired > 0
+keydir_keys{state="pending"} > 0                       # clé à valider
+relay_keydir_metrics_up == 0
+```
+
+Les métriques ne contiennent ni objet ni corps. Elles portent les adresses
+des destinataires refusés et des clés à surveiller (données personnelles des
+destinataires internes) : n'ouvrir le port qu'au serveur Prometheus et aligner
+sa rétention sur celle des logs.
 
 ### Paramètres Postfix clés
 
@@ -360,13 +410,20 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 | `KEYDIR_PUBLISHED_PORT` | port HTTPS publié sur l'hôte | `443` | non |
 | `KEYDIR_DOMAINS` | domaines dont l'annuaire publie les clés (séparés par des espaces) | — | **oui** |
 | `KEYDIR_AUDIT_RETENTION_DAYS` | durée de conservation du journal d'audit de l'annuaire, en jours | `365` | non |
+| `KEYDIR_EXPIRY_WARNING_DAYS` | seuil « proche de l'expiration » des clés (métriques), en jours | `30` | non |
+| `RELAY_METRICS_BIND_ADDRESS` | IP de l'hôte sur laquelle publier les métriques (compose) | `127.0.0.1` | non |
+| `RELAY_METRICS_PUBLISHED_PORT` | port des métriques publié sur l'hôte | `9154` | non |
+| `RELAY_METRICS_PROBE_INTERVAL` | intervalle de la sonde TLS du smarthost, en secondes (5 à 86400) | `300` | non |
 
 Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`,
 `GATEWAY_CONTENT_RULES_FILE=/etc/relay/content-rules.toml`
 (répertoire `config/` monté en lecture seule), `RELAY_APP_SECRETS_DIR=/run/secrets/apps`
 (répertoire `secrets/apps/` monté en lecture seule), `RELAY_MILTER=inet:gateway:9900`,
 `RELAY_PROXY_FILTER=gateway:10025`, `RELAY_REINJECT_PORT=10026` (relai),
-`GATEWAY_PROXY_LISTEN=0.0.0.0:10025`, `GATEWAY_REINJECT_PORT=10026` (passerelle).
+`GATEWAY_PROXY_LISTEN=0.0.0.0:10025`, `GATEWAY_REINJECT_PORT=10026` (passerelle),
+`RELAY_KEYDIR_METRICS_URL=http://keydir:9155/metrics` (relai, vide = désactivé),
+`KEYDIR_METRICS_LISTEN=0.0.0.0:9155` (annuaire, vide = désactivé). Valeurs par
+défaut dans l'image : `RELAY_METRICS_ENABLED=yes`, `RELAY_METRICS_LISTEN=0.0.0.0:9154`.
 
 ### Secrets (`secrets/`, voir [secrets/README.md](../secrets/README.md))
 
@@ -452,6 +509,7 @@ relai (`docker compose restart relay`), puis mettez à jour l'application.
 | Supprimer un message | `docker compose exec relay postsuper -d <QUEUE_ID>` |
 | Configuration effective | `docker compose exec relay postconf -n` |
 | Vérifier l'inventaire dans le conteneur | `docker compose exec relay relay-config check` |
+| Métriques (depuis l'hôte) | `curl -s http://127.0.0.1:9154/metrics` |
 
 Exemples de lignes de log :
 
@@ -464,10 +522,8 @@ postfix/smtp[45]: Verified TLS connection established to smtp.example-provider.c
 postfix/smtp[45]: 3ED5FD2247: to=<dev@customer.test>, relay=smtp.example-provider.com[x.x.x.x]:587, ..., status=sent (250 Ok queued)
 ```
 
-Pour la supervision (en attendant l'exporteur de métriques du lot 7), une
-alerte peut se déclencher sur l'état `unhealthy` d'un conteneur, la croissance
-de la file, ou des occurrences de `status=deferred`, `authentication failed`,
-`Client host rejected`.
+La supervision repose sur l'exporteur Prometheus (section 2, « Supervision »),
+complété par une alerte sur l'état `unhealthy` d'un conteneur.
 
 ## 7. Configuration des applications
 
@@ -636,6 +692,11 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 | IT6.2 | jeton GitLab dans une pièce jointe encodée en base64 (absent du message brut) : détecté après décodage, refusé |
 | IT6.3 | pièce jointe `.exe` : refusée (`forbidden-extension`) |
 | IT6.4 | message sain (texte, PDF joint) : livré ; règles invalides ou absentes : la passerelle refuse de démarrer |
+| IT7.1 | après un refus faute de clé (carol), un échec d'authentification (jenkins) et un blocage de contenu (clé privée) : réponses SMTP attendues et compteurs correspondants incrémentés |
+| IT7.2 | fournisseur arrêté : au moins un message en file, plus ancien d'âge > 0, `relay_smarthost_up` = 0 ; relancé : message livré, file vide, smarthost joignable |
+| IT7.3 | date d'expiration du certificat du smarthost (sonde TLS) = celle du certificat de test (`openssl`), certificat vérifié |
+| IT7.4 | clé expirant dans 10 jours (GnuPG) déposée et validée : signalée « proche de l'expiration » ; révoquée par l'administrateur : signalée révoquée |
+| IT7.5 | aucun objet ni corps de message de test (marqueurs de toutes les suites) dans les journaux d'aucun conteneur ; témoin : le marqueur est bien dans le message déchiffré |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -662,6 +723,8 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
   - Avec la publication de ports Docker standard (NAT iptables), l'IP du client est conservée.
   - Ne placez **pas** le relai derrière un proxy TCP ou un load balancer en mode proxy : Postfix verrait l'IP du proxy.
 - **Exposition réseau.** Publiez le port 587 uniquement sur l'IP privée (`RELAY_BIND_ADDRESS`) et doublez ce filtrage d'un pare-feu (VLAN Applications → 587 uniquement ; sortie vers le fournisseur uniquement).
+- **Supervision.** Métriques publiées sur la boucle locale par défaut ; exporteur non privilégié (`nobody`) ; métriques de l'annuaire sur un port interne non publié ; ni objet ni corps, mais des adresses de destinataires (accès à restreindre au serveur Prometheus).
+- **Journaux (RGPD).** Métadonnées seulement (enveloppe, codes, identifiant de règle), vérifié par un test sur tous les conteneurs (IT7.5) ; aucun journal persistant dans les conteneurs (logs Docker en rotation, 5 × 10 Mo) ; audit de l'annuaire purgé après `KEYDIR_AUDIT_RETENTION_DAYS`.
 - **Annuaire.** Aucune clé publiée sans validation humaine de l'empreinte ; dépôts limités en taille et contrôlés (algorithmes, expiration, identité) ; HTTPS uniquement ; service non privilégié.
 - **Secrets.** Fichiers montés en lecture seule, jamais dans l'image ni dans `docker inspect` ; `.env` et `secrets/*` sont ignorés par git ; dans le conteneur, base SASL `0640 root:postfix`, identifiants et clé TLS `0600 root`, sur tmpfs.
 - **TLS vers le fournisseur.** `secure` vérifie la chaîne et le nom de l'hôte ; TLS 1.0 et 1.1 interdits, suites `high` uniquement.
@@ -692,3 +755,6 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 | `554 Message rejected: Email address is not verified` (fournisseur) | L'adresse de l'application ou le domaine n'est pas vérifié chez le fournisseur. |
 | `552 5.3.4 Message size exceeds fixed limit` | Augmentez `MESSAGE_SIZE_LIMIT`, en respectant la limite du fournisseur. |
 | `unhealthy` | `docker compose exec relay relay-healthcheck` ou `docker compose exec gateway gateway-healthcheck` affiche la cause. |
+| Métriques absentes (`curl` sans réponse sur 9154) | `RELAY_METRICS_BIND_ADDRESS` ou pare-feu ; dans les logs du relai, `relay-exporter: métriques sur …` au démarrage, `relay-run: exporteur de métriques arrêté` en cas d'arrêt (il est relancé). |
+| `relay_keydir_metrics_up 0` | Annuaire arrêté, ou `KEYDIR_METRICS_LISTEN` vide. |
+| `relay_smarthost_up 0` alors que les mails partent | Sortie filtrée pour les connexions de sonde, ou intervalle trop long : la dernière sonde date de `relay_smarthost_last_probe_timestamp_seconds`. |

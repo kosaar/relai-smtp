@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+# Exporteur Prometheus du relai (lancé par relay-run). Voir relayexp/server.py.
+import sys
+
+sys.path.insert(0, "/opt/relay/lib")
+from relayexp.server import main  # noqa: E402
+
+sys.exit(main())
