@@ -68,6 +68,7 @@ relay/entrypoint.sh       validation de la configuration, génération de /etc/p
 relay/config/*.tmpl       templates de main.cf, master.cf et de la configuration SASL
 relay/scripts/            bibliothèque commune, healthcheck
 gateway/                  passerelle (milter Python) appelée par Postfix avant la mise en file
+keydir/                   annuaire de clés publiques OpenPGP (dépôt HTTPS, validation, WKD, révocations)
 test/provider/            fournisseur simulé (Postfix 587 TLS + SASL -> Dovecot IMAPS) et PKI de test
 test/workstation/         poste destinataire simulé (RNP, GnuPG, relève IMAPS), test uniquement
 test/client/              client swaks, test uniquement
@@ -91,8 +92,9 @@ pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_T
 |-------|----------------|------|
 | `relay` | `postfix`, `libsasl2-modules` (PLAIN/LOGIN), `libsasl2-modules-db` et `sasl2-bin` (base SASL des applications), `python3` (`relay-config`), `ca-certificates` | relai de production |
 | `gateway` | `python3`, `python3-milter` | passerelle de production (milter), exécutée sous un utilisateur non privilégié |
+| `keydir` | `python3` (serveur HTTPS, SQLite), `gpg` (lecture des clés publiques) | annuaire de clés de production, exécuté sous un utilisateur non privilégié |
 | `test/provider` | `postfix`, `sasl2-bin`, `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
-| `test/workstation` | `rnp`, `gnupg`, `curl`, `openssl`, `python3` | simule le poste d'un destinataire (rôle de Thunderbird) |
+| `test/workstation` | `rnp`, `gnupg`, `gpg-wks-client`, `curl`, `openssl`, `python3` | simule le poste d'un destinataire (rôle de Thunderbird) : outils `mailbox` (IMAPS) et `keys` (clés RNP, annuaire) |
 | `test/client` | `swaks`, `libnet-ssleay-perl`, `libauthen-sasl-perl`, `openssl`, `python3` | simule une application (déclarée ou non) |
 
 Bonnes pratiques appliquées dans les Dockerfiles :
@@ -137,6 +139,45 @@ Les journaux de la passerelle ne contiennent que des métadonnées
 
 Les lots suivants y ajoutent les quotas, le contrôle du contenu et le
 chiffrement OpenPGP.
+
+### Annuaire de clés (`keydir/`)
+
+Service HTTPS (TLS ≥ 1.2 uniquement, aucun port en clair) qui conserve les clés
+publiques des destinataires (SQLite, volume `keydir-data`) :
+
+| Requête | Rôle |
+|---------|------|
+| `POST /api/v1/keys?email=<adresse>` | dépôt d'une clé publique (armure ASCII ou binaire) : `202`, état **en attente** ; ou d'un certificat de révocation : appliqué **immédiatement** (`200`) ; refus motivé : `422` |
+| `GET /api/v1/keys/<adresse>` | état : `none`, `pending`, `approved`, `revoked` (JSON) |
+| `GET /.well-known/openpgpkey/<domaine>/hu/<hachage>` | **WKD** (méthode avancée) : clé validée, réduite à l'identité de l'adresse, lue par GnuPG, Thunderbird et la passerelle |
+| `GET /.well-known/openpgpkey/<domaine>/policy` | fichier de politique WKD |
+
+Contrôles au dépôt : un seul certificat ; non expiré, non révoqué ; une identité
+(UID) portant exactement l'adresse ; domaine géré (`KEYDIR_DOMAINS`) ; une
+sous-clé de chiffrement valide ; algorithmes RSA ≥ 3072 ou Ed25519/Cv25519
+(X25519 en clé v6). La clé RSA 2048 générée par défaut par RNP est refusée :
+générer une clé Ed25519/Cv25519 (choix par défaut de Thunderbird) ou RSA 3072.
+
+Une clé n'est publiée qu'après validation par un administrateur, qui compare
+l'empreinte **hors bande** avec le destinataire (téléphone, en personne) :
+
+```bash
+docker compose exec keydir keydir-admin list --state pending
+docker compose exec keydir keydir-admin show alice@example.com
+docker compose exec keydir keydir-admin approve alice@example.com <EMPREINTE>   # refusé si l'empreinte diffère
+docker compose exec keydir keydir-admin reject alice@example.com <EMPREINTE>
+docker compose exec keydir keydir-admin revoke alice@example.com    # révocation administrative (clé dépubliée)
+docker compose exec keydir keydir-admin remove alice@example.com    # suppression (RGPD)
+docker compose exec keydir keydir-admin audit
+```
+
+- **Rotation** : la nouvelle clé déposée reste en attente, l'ancienne est servie
+  jusqu'à la validation de la nouvelle, qui la remplace (état `superseded`).
+- **Révocation** par certificat (exporté depuis Thunderbird ou RNP) : appliquée
+  sans validation, la clé révoquée restant publiée pour que les clients
+  l'apprennent ; elle ne peut plus être utilisée pour chiffrer.
+- **Journal d'audit** (dépôts, refus, validations, révocations, suppressions) :
+  métadonnées seulement, purgé au-delà de `KEYDIR_AUDIT_RETENTION_DAYS` jours.
 
 ### Paramètres Postfix clés
 
@@ -213,6 +254,10 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 | `RELAY_INET_PROTOCOLS` | `ipv4`, `ipv6` ou `all` | `ipv4` | non |
 | `TZ` | fuseau horaire des logs | `UTC` | non |
 | `RELAY_IMAGE_TAG` | tag des images construites | `2.0.0` | non |
+| `KEYDIR_BIND_ADDRESS` | IP **privée** de l'hôte sur laquelle publier l'annuaire (compose) | — | **oui** |
+| `KEYDIR_PUBLISHED_PORT` | port HTTPS publié sur l'hôte | `443` | non |
+| `KEYDIR_DOMAINS` | domaines dont l'annuaire publie les clés (séparés par des espaces) | — | **oui** |
+| `KEYDIR_AUDIT_RETENTION_DAYS` | durée de conservation du journal d'audit de l'annuaire, en jours | `365` | non |
 
 Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`
 (répertoire `config/` monté en lecture seule), `RELAY_APP_SECRETS_DIR=/run/secrets/apps`
@@ -224,6 +269,7 @@ Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/application
 |--------|--------------|------|
 | `relay_smtp_username`, `relay_smtp_password` | `secrets/relay_smtp_*` | identifiants chez le fournisseur |
 | `relay_tls_cert`, `relay_tls_key` | `secrets/relay_tls_*` | certificat et clé de `smtp-relay` (port 587) |
+| `keydir_tls_cert`, `keydir_tls_key` | `secrets/keydir_tls_*` | certificat et clé de l'annuaire (`openpgpkey.<domaine>`) |
 | — | `secrets/apps/<application>` | mot de passe SMTP de chaque application (16 caractères minimum, une ligne) |
 
 Ordre de lecture d'un secret `X` : le chemin indiqué par `X_FILE`, sinon
@@ -239,7 +285,7 @@ vi config/applications.toml             # applications, adresses, IP
 PYTHONPATH=common python3 -m relaycfg check --secrets-dir secrets/apps --inventory config/applications.toml
 
 docker compose up -d --build
-docker compose ps                       # relay et gateway doivent afficher (healthy)
+docker compose ps                       # relay, gateway et keydir doivent afficher (healthy)
 docker compose logs relay               # résumé de la configuration au démarrage
 ```
 
@@ -426,8 +472,9 @@ vérifié) depuis le poste de travail.
 | `relay` | 10.0.1.5 (alias `smtp-relay`) / 10.0.2.5 / 10.0.3.5 | relai avec identifiants valides |
 | `relay-badcreds` | 10.0.1.6 / 10.0.2.6 / 10.0.3.6 | même image, mot de passe erroné chez le fournisseur |
 | `gateway` | 10.0.3.20:9900 | passerelle (milter) |
+| `keydir` | 10.0.2.30:8443 (alias `openpgpkey.example.com`) / 10.0.3.30 | annuaire de clés (HTTPS, WKD), domaines `example.com` et `partner.test` |
 | `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
-| `workstation` | 10.0.2.50 | poste destinataire : relève les BAL en IMAPS (outil `mailbox`), RNP et GnuPG |
+| `workstation` | 10.0.2.50 | poste destinataire : relève les BAL en IMAPS (outil `mailbox`), génère ses clés avec RNP et les dépose sur l'annuaire (outil `keys`) |
 
 Les réseaux Docker de test (`private`, `internet`, `backend`) sont `internal`,
 sans accès à Internet.
@@ -452,6 +499,13 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 | IT1.8 | identifiants valides depuis une IP non déclarée (`554`) ou depuis l'IP d'une autre application (`550`) : refusé |
 | IT1.9 | inventaire invalide (adresse en double, secret absent, adresse hors domaine, quota invalide) : relai et passerelle refusent de démarrer (`FATAL`) |
 | IT1.10 | ajout d'une application (entrée + secret) puis redémarrage : elle envoie, les autres ne sont pas affectées |
+| IT2.1 | clé générée par RNP sur le poste, déposée en HTTPS (certificat vérifié) : en attente, absente du WKD (404) |
+| IT2.2 | validation refusée si l'empreinte diffère ; après validation, le WKD (URL calculée par `gpg-wks-client`) sert la clé, empreinte identique à celle du poste ; second domaine (`partner.test`) |
+| IT2.3 | refus motivés (`422`) : sans sous-clé de chiffrement, expirée, RSA 1024, RSA 2048, UID différent, contenu invalide, domaine non géré ; RSA 3072 accepté |
+| IT2.4 | rotation : ancienne clé servie jusqu'à la validation de la nouvelle, puis seule la nouvelle |
+| IT2.5 | certificat de révocation (RNP) appliqué immédiatement, clé servie marquée révoquée ; certificat d'une autre clé refusé |
+| IT2.6 | HTTP en clair sans réponse (et journalisé), TLS 1.1 refusé, TLS 1.2 et 1.3 acceptés (certificat vérifié) |
+| IT2.7 | état conservé après redémarrage ; journal d'audit sans contenu de clé |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -475,6 +529,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
   - Avec la publication de ports Docker standard (NAT iptables), l'IP du client est conservée.
   - Ne placez **pas** le relai derrière un proxy TCP ou un load balancer en mode proxy : Postfix verrait l'IP du proxy.
 - **Exposition réseau.** Publiez le port 587 uniquement sur l'IP privée (`RELAY_BIND_ADDRESS`) et doublez ce filtrage d'un pare-feu (VLAN Applications → 587 uniquement ; sortie vers le fournisseur uniquement).
+- **Annuaire.** Aucune clé publiée sans validation humaine de l'empreinte ; dépôts limités en taille et contrôlés (algorithmes, expiration, identité) ; HTTPS uniquement ; service non privilégié.
 - **Secrets.** Fichiers montés en lecture seule, jamais dans l'image ni dans `docker inspect` ; `.env` et `secrets/*` sont ignorés par git ; dans le conteneur, base SASL `0640 root:postfix`, identifiants et clé TLS `0600 root`, sur tmpfs.
 - **TLS vers le fournisseur.** `secure` vérifie la chaîne et le nom de l'hôte ; TLS 1.0 et 1.1 interdits, suites `high` uniquement.
 - **Durcissement des conteneurs** : système de fichiers racine en lecture seule, capacités minimales (aucune pour la passerelle), `no-new-privileges`, limites de ressources, bannière sans version, `VRFY` désactivé.

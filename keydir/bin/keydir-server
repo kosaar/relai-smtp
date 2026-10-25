@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+# Serveur HTTPS de l'annuaire. Voir keydir/server.py.
+import sys
+
+sys.path.insert(0, "/opt/keydir/lib")
+from keydir.server import main  # noqa: E402
+
+sys.exit(main())

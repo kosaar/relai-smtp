@@ -1,6 +1,7 @@
 # Plan d'implémentation : relais SMTP applicatif chiffrant (OpenPGP)
 
 > Statut : **validé le 2026-10-25 (toutes les décisions D1 à D12 acceptées)**. Implémentation lot par lot, un commit poussé par lot.
+> Avancement : lots 0, 1 et 2 terminés.
 > Base : branche `claude/vigilant-mccarthy-kgzh0e` (relai Postfix, liste blanche IP,
 > TLS + SASL vers le fournisseur, 19 tests d'intégration verts).
 > Branche de travail : `claude/gallant-shannon-7yirrk`.

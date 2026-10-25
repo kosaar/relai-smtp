@@ -5,6 +5,7 @@
 #   - secrets/apps/<application> mot de passe SMTP de chaque application ;
 #   - secrets/relay_smtp_*       identifiants chez le fournisseur ;
 #   - secrets/relay_tls_*        certificat et clé de smtp-relay (soumission 587) ;
+#   - secrets/keydir_tls_*       certificat et clé de l'annuaire (openpgpkey.<domaine>) ;
 #   - .env                       paramètres (copie de .env.example).
 #  Usage : docker compose up -d --build
 # =============================================================================
@@ -127,16 +128,67 @@ services:
       start_period: 10s
       retries: 3
 
+  # Annuaire de clés publiques : dépôt HTTPS (postes), validation par un
+  # administrateur, publication WKD (passerelle, Thunderbird).
+  keydir:
+    <<: *hardening
+    build:
+      context: .
+      dockerfile: keydir/Dockerfile
+      args:
+        VERSION: ${RELAY_IMAGE_TAG:-2.0.0}
+    image: smtp-relay-keydir:${RELAY_IMAGE_TAG:-2.0.0}
+    hostname: keydir
+    restart: unless-stopped
+    environment:
+      KEYDIR_DOMAINS: ${KEYDIR_DOMAINS:?KEYDIR_DOMAINS doit lister les domaines publiés par l'annuaire}
+      KEYDIR_AUDIT_RETENTION_DAYS: ${KEYDIR_AUDIT_RETENTION_DAYS:-365}
+      TZ: ${TZ:-UTC}
+    secrets:
+      - keydir_tls_cert
+      - keydir_tls_key
+    ports:
+      # Publié sur l'IP privée de l'hôte, pour les postes (dépôt de clé, WKD).
+      - "${KEYDIR_BIND_ADDRESS:?KEYDIR_BIND_ADDRESS doit contenir l'IP privée de l'hôte}:${KEYDIR_PUBLISHED_PORT:-443}:8443"
+    volumes:
+      - keydir-data:/var/lib/keydir
+    networks:
+      keydir-net:
+        aliases: [keydir]
+      backend: {}
+    # Démarre en root (copie du certificat, droits du volume) puis s'exécute
+    # sous l'utilisateur keydir, sans capacité.
+    tmpfs:
+      - /run:mode=0755,size=4m
+      - /tmp:mode=1777,size=32m
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+          pids: 100
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/keydir-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
 networks:
   relay-net:
     driver: bridge
-  # Relai <-> passerelle : aucun accès extérieur.
+  # Postes de travail -> annuaire (HTTPS).
+  keydir-net:
+    driver: bridge
+  # Relai <-> passerelle <-> annuaire : aucun accès extérieur.
   backend:
     driver: bridge
     internal: true
 
 volumes:
   relay-queue:
+  keydir-data:
 
 secrets:
   relay_smtp_username:
@@ -147,3 +199,7 @@ secrets:
     file: ./secrets/relay_tls_cert
   relay_tls_key:
     file: ./secrets/relay_tls_key
+  keydir_tls_cert:
+    file: ./secrets/keydir_tls_cert
+  keydir_tls_key:
+    file: ./secrets/keydir_tls_key

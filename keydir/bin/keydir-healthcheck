@@ -1,0 +1,18 @@
+#!/usr/bin/python3
+# Healthcheck Docker : l'annuaire répond en HTTPS sur /healthz (sonde locale,
+# le certificat n'est pas vérifié ici : seul l'état du service compte).
+import os
+import ssl
+import sys
+import urllib.request
+
+port = os.environ.get("KEYDIR_LISTEN", "0.0.0.0:8443").rpartition(":")[2]
+ctx = ssl._create_unverified_context()
+try:
+    with urllib.request.urlopen(f"https://127.0.0.1:{port}/healthz", context=ctx, timeout=4) as r:
+        ok = r.status == 200
+except OSError as e:
+    print(f"annuaire injoignable : {e}")
+    sys.exit(1)
+print("ok" if ok else "état inattendu")
+sys.exit(0 if ok else 1)

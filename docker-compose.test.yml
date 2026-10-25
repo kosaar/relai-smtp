@@ -11,8 +11,9 @@
 #                           en cours de test, IT1.10) ; relay .5 (alias
 #                           smtp-relay), relay-badcreds .6
 #    internet 10.0.2.0/24 : relay .5, relay-badcreds .6, provider .10,
+#                           keydir .30 (alias openpgpkey.example.com),
 #                           workstation .50
-#    backend  10.0.3.0/24 : relay .5, relay-badcreds .6, gateway .20
+#    backend  10.0.3.0/24 : relay .5, relay-badcreds .6, gateway .20, keydir .30
 #  Inventaire : tests/.work/config/applications.toml (copie de
 #  tests/fixtures/applications.toml) ; secrets : tests/.work/secrets.
 # =============================================================================
@@ -117,6 +118,29 @@ services:
     networks: !override
       backend:
         ipv4_address: 10.0.3.20
+    healthcheck:
+      interval: 5s
+      start_period: 5s
+
+  keydir:
+    environment:
+      KEYDIR_DOMAINS: "example.com partner.test"
+      KEYDIR_TLS_CERT_FILE: /etc/test-pki/keydir.crt
+      KEYDIR_TLS_KEY_FILE: /etc/test-pki/keydir.key
+    secrets: !reset []
+    ports: !reset []
+    volumes: !override
+      - keydir-data:/var/lib/keydir
+      - test-pki:/etc/test-pki:ro
+    networks: !override
+      internet:
+        ipv4_address: 10.0.2.30
+        aliases: [keydir, openpgpkey.example.com]
+      backend:
+        ipv4_address: 10.0.3.30
+    depends_on:
+      pki:
+        condition: service_completed_successfully
     healthcheck:
       interval: 5s
       start_period: 5s

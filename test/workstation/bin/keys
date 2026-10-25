@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  keys — clés OpenPGP du poste de travail simulé (TEST UNIQUEMENT).
+#  Paire de clés générée et conservée par RNP (bibliothèque de Thunderbird),
+#  un trousseau par adresse dans ~/.rnp/<adresse> ; dépôt et consultation de
+#  l'annuaire en HTTPS (certificat vérifié par l'AC de test).
+#
+#  keys gen <adresse>            paire Ed25519/Cv25519 (RNP) ; l'ancienne est archivée
+#  keys gen-rsa <adresse> <bits> paire RSA (RNP)
+#  keys fpr <adresse>            empreinte de la clé courante (selon RNP)
+#  keys export <adresse>         clé publique (armure ASCII, RNP)
+#  keys revcert <adresse>        certificat de révocation (RNP)
+#  keys bad <cas> <adresse>      clé publique invalide générée par GnuPG :
+#                                nosub (sans sous-clé de chiffrement), expired, rsa1024
+#  keys deposit <adresse> [fichier]  dépôt (stdin par défaut) ; dernière ligne : HTTP_CODE=<code>
+#  keys status <adresse>         état de la clé sur l'annuaire (JSON)
+#  keys wkd-url <adresse>        URL WKD calculée par gpg-wks-client, vers l'annuaire de test
+#  keys wkd <adresse>            clé servie par le WKD (binaire) ; code 1 si absente
+#  keys wkd-show <adresse>       clé servie par le WKD : « <empreinte> <validité> <uids> » (GnuPG)
+#
+#  Variables : KEYDIR_URL (https://keydir:8443), KEYDIR_CAFILE (/pki/ca.crt).
+# =============================================================================
+set -Eeuo pipefail
+KEYDIR_URL=${KEYDIR_URL:-https://keydir:8443}
+CAFILE=${KEYDIR_CAFILE:-/pki/ca.crt}
+RNPDIR=${RNP_HOME_BASE:-$HOME/.rnp}
+die() { echo "keys: $*" >&2; exit 2; }
+home_of() { printf '%s/%s' "$RNPDIR" "$1"; }
+curl_kd() { curl -sS --cacert "$CAFILE" --tlsv1.2 --max-time 20 "$@"; }
+
+gpg_tmp() {  # gpg_tmp <args...> : GnuPG dans un trousseau jetable
+    local h rc=0
+    h=$(mktemp -d); chmod 700 "$h"
+    gpg --homedir "$h" --batch --no-tty --quiet "$@" || rc=$?
+    gpgconf --homedir "$h" --kill all >/dev/null 2>&1 || true
+    rm -rf "$h"
+    return "$rc"
+}
+
+rnp_fpr() {  # empreinte de la clé primaire (ligne suivant « pub » dans la sortie RNP)
+    rnpkeys --homedir "$(home_of "$1")" --list-keys 2>/dev/null \
+        | awk '/^pub /{getline; gsub(/ /,""); print toupper($0); exit}'
+}
+
+new_home() {  # archive le trousseau existant de l'adresse
+    local h; h=$(home_of "$1")
+    if [[ -d $h ]]; then mv "$h" "$h.$(date +%s%N)"; fi
+    mkdir -p "$h"; chmod 700 "$h"
+    printf '%s' "$h"
+}
+
+cmd=${1:-}; shift || true
+case $cmd in
+    gen)
+        [[ $# -eq 1 ]] || die "usage : keys gen <adresse>"
+        h=$(new_home "$1")
+        # 22 = EdDSA (Ed25519) + ECDH (Cv25519), clé v4 (format lu par Thunderbird).
+        printf '22\n' | rnpkeys --homedir "$h" --generate-key --expert --userid "$1" --password '' >/dev/null 2>&1 \
+            || die "génération RNP impossible"
+        rnp_fpr "$1" ;;
+    gen-rsa)
+        [[ $# -eq 2 ]] || die "usage : keys gen-rsa <adresse> <bits>"
+        h=$(new_home "$1")
+        rnpkeys --homedir "$h" --generate-key --numbits "$2" --userid "$1" --password '' >/dev/null 2>&1 \
+            || die "génération RNP impossible"
+        rnp_fpr "$1" ;;
+    fpr)     rnp_fpr "$1" ;;
+    export)  rnpkeys --homedir "$(home_of "$1")" --export-key "$1" ;;
+    revcert) rnpkeys --homedir "$(home_of "$1")" --export-rev "$1" --password '' ;;
+    bad)
+        [[ $# -eq 2 ]] || die "usage : keys bad <nosub|expired|rsa1024> <adresse>"
+        h=$(mktemp -d); chmod 700 "$h"
+        g=(gpg --homedir "$h" --batch --no-tty --quiet --pinentry-mode loopback --passphrase '')
+        case $1 in
+            nosub)   "${g[@]}" --quick-gen-key "$2" ed25519 sign 1y ;;
+            expired) "${g[@]}" --faked-system-time '20200101T000000!' --quick-gen-key "$2" default default 1d ;;
+            rsa1024) "${g[@]}" --quick-gen-key "$2" rsa1024 default 1y ;;
+            *) die "cas inconnu : $1" ;;
+        esac 2>/dev/null || die "génération GnuPG ($1) impossible"
+        gpg --homedir "$h" --batch --armor --export "$2"
+        gpgconf --homedir "$h" --kill all >/dev/null 2>&1 || true
+        rm -rf "$h" ;;
+    deposit)
+        [[ $# -ge 1 ]] || die "usage : keys deposit <adresse> [fichier]"
+        curl_kd -X POST -H 'Content-Type: application/pgp-keys' --data-binary "@${2:--}" \
+            -w '\nHTTP_CODE=%{http_code}\n' "${KEYDIR_URL}/api/v1/keys?email=$1" ;;
+    status)  curl_kd "${KEYDIR_URL}/api/v1/keys/$1"; echo ;;
+    wkd-url)
+        url=$(gpg-wks-client --print-wkd-url "$1") || die "gpg-wks-client a échoué"
+        printf '%s/%s\n' "$KEYDIR_URL" "${url#https://*/}" ;;
+    wkd)
+        url=$("$0" wkd-url "$1")
+        out=$(mktemp)
+        code=$(curl_kd -o "$out" -w '%{http_code}' "$url") || { rm -f "$out"; exit 2; }
+        if [[ $code == 200 ]]; then cat "$out"; rm -f "$out"; else rm -f "$out"; echo "keys: WKD HTTP $code" >&2; exit 1; fi ;;
+    wkd-show)
+        tmp=$(mktemp)
+        "$0" wkd "$1" >"$tmp" || { rm -f "$tmp"; exit 1; }
+        gpg_tmp --with-colons --fixed-list-mode --show-keys "$tmp" \
+            | awk -F: '$1=="pub"{v=$2} $1=="fpr"&&!f{f=$10} $1=="uid"{u=u (u?",":"") $10} END{print f, v, u}'
+        rm -f "$tmp" ;;
+    *) sed -n '3,25p' "$0"; exit 2 ;;
+esac

@@ -1,9 +1,10 @@
 # Architecture du relai SMTP
 
-> État actuel : lot 1 du [plan d'implémentation](plan-implementation.md)
-> (soumission 587 authentifiée, identité par application, passerelle milter).
-> Les lots suivants ajoutent l'annuaire de clés, le chiffrement OpenPGP, les
-> quotas, le contrôle du contenu et la supervision.
+> État actuel : lots 1 et 2 du [plan d'implémentation](plan-implementation.md)
+> (soumission 587 authentifiée, identité par application, passerelle milter,
+> annuaire de clés). Les lots suivants ajoutent le chiffrement OpenPGP (la
+> passerelle interrogera alors l'annuaire), les quotas, le contrôle du contenu
+> et la supervision.
 
 ## Vue d'ensemble
 
@@ -29,7 +30,10 @@ flowchart LR
             INV -. "relay-config<br/>(au démarrage)" .-> ACL
         end
         GW["Conteneur gateway<br/>milter Python :9900<br/>login ↔ IP ↔ From:"]
+        KD["Conteneur keydir<br/>HTTPS :8443 (TLS ≥ 1.2)<br/>dépôt · validation admin<br/>WKD · révocations · audit"]
     end
+
+    TB["Poste (Thunderbird)<br/>clé privée locale"]
 
     subgraph NET["🌐 Internet"]
         MTA["Smarthost du fournisseur"]
@@ -39,6 +43,8 @@ flowchart LR
     UNK -- "587" --x SMTPD
     ACL <-- "milter, avant la mise en file<br/>(réseau backend interne)" --> GW
     SMTP == "587/465 TLS ≥ 1.2 vérifié<br/>AUTH SASL" ==> MTA
+    TB -- "HTTPS : dépôt de clé,<br/>WKD (openpgpkey.example.com)" --> KD
+    GW -. "WKD (lot 3)" .-> KD
 
     classDef deny fill:#fde2e2,stroke:#c0392b,color:#7b1d1d;
     classDef ok fill:#e3f4e8,stroke:#2e8b57,color:#1b4d2e;
@@ -60,6 +66,7 @@ que sur le port 587 et n'est pas joignable depuis Internet.
 | 2 | Hôte non déclaré → relai | 587/tcp | — | — | **refus** `554 5.7.1` dès la connexion + log |
 | 3 | Relai ↔ passerelle | 9900/tcp (réseau `backend` interne) | — (réseau Docker interne) | — | `milter_default_action = tempfail` : passerelle absente ⇒ `451` |
 | 4 | Relai → smarthost | 587/tcp (STARTTLS) ou 465/tcp | **TLS ≥ 1.2**, certificat vérifié (`secure`) | **SASL** (secrets) | `smtp_tls_security_level` |
+| 5 | Poste → annuaire | 443/tcp (8443 dans le conteneur) | **HTTPS**, TLS ≥ 1.2, aucun port en clair | aucune (dépôt public) | clé publiée seulement après validation de l'empreinte par un administrateur ; révocation par certificat signé |
 
 ## Traitement d'un message
 
@@ -113,7 +120,8 @@ flowchart LR
     end
     subgraph I["réseau « internet » 10.0.2.0/24 (internal)"]
         F["provider .10<br/>Postfix :587 STARTTLS + SASL<br/>→ LMTP → Dovecot (BAL)"]
-        W["workstation .50<br/>relève IMAPS · RNP · GnuPG"]
+        W["workstation .50<br/>relève IMAPS · clés RNP · GnuPG"]
+        K["keydir .30 (aussi backend .30)<br/>alias openpgpkey.example.com"]
     end
     C1 -- "587 STARTTLS vérifié + AUTH" --> R
     CU -- "587" --x R
@@ -123,6 +131,7 @@ flowchart LR
     R == "587 TLS vérifié + SASL" ==> F
     RB -. "SASL refusé → file deferred" .-> F
     W -- "IMAPS 993 (certificat vérifié)" --> F
+    W -- "HTTPS 8443 : dépôt, WKD" --> K
 ```
 
 La PKI de test (AC + certificats `provider`, `smtp-relay`, `keydir`) est

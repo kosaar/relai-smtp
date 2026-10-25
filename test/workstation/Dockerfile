@@ -3,7 +3,8 @@
 # TEST UNIQUEMENT — simule le poste d'un destinataire (rôle de Thunderbird) :
 #  - RNP (bibliothèque OpenPGP de Thunderbird) : génère la paire de clés,
 #    déchiffre les messages ;
-#  - GnuPG, curl : dépôt de clé sur l'annuaire en HTTPS (lot 2) ;
+#  - GnuPG, gpg-wks-client, curl : clés invalides de test, URL WKD, dépôt de
+#    clé sur l'annuaire en HTTPS (outil keys) ;
 #  - Python (imaplib) : relève la BAL en IMAPS, certificat vérifié (outil mailbox).
 ARG UBUNTU_TAG=resolute-20260927
 FROM ubuntu:${UBUNTU_TAG}
@@ -17,7 +18,7 @@ LABEL org.opencontainers.image.title="smtp-relay-test-workstation" \
 ARG DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends rnp gnupg curl ca-certificates openssl python3; \
+    apt-get install -y --no-install-recommends rnp gnupg gpg-wks-client curl ca-certificates openssl python3; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb; \
     useradd --create-home --shell /bin/bash user
 

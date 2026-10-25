@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# keydir-admin : administration de l'annuaire (voir keydir/admin.py).
+# Lancé en root par « docker compose exec », il s'exécute sous l'utilisateur
+# keydir pour que la base SQLite garde un propriétaire unique.
+set -euo pipefail
+if (( EUID == 0 )); then
+    exec setpriv --reuid=keydir --regid=keydir --init-groups --inh-caps=-all \
+        env KEYDIR_ADMIN="${KEYDIR_ADMIN:-${SUDO_USER:-root}}" "$0" "$@"
+fi
+exec python3 -c 'import sys; sys.path.insert(0, "/opt/keydir/lib"); from keydir.admin import main; sys.exit(main())' "$@"
