@@ -7,8 +7,9 @@ pliage), pour que la partie chiffrée restitue exactement l'original.
 Partie chiffrée (lue par Thunderbird, « protected-headers v1 ») :
 
     Content-Type: multipart/mixed; boundary="…"; protected-headers="v1"
-    Subject: <objet réel>            <- en-têtes protégés
-    From: … / To: … / Date: … / Message-ID: …
+    Subject: <objet réel>            <- en-têtes protégés : TOUS les en-têtes
+    From: … / Message-ID: <réel> …      d'origine (X-GitLab-*, Received…)
+    X-GitLab-Project: …
 
     --…
     Content-Type: <type d'origine>   <- entité MIME d'origine, inchangée
@@ -19,12 +20,19 @@ Partie chiffrée (lue par Thunderbird, « protected-headers v1 ») :
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import re
 import secrets
 from email.header import Header
 
-# En-têtes recopiés dans la partie chiffrée (l'objet réel n'existe plus qu'ici).
-PROTECTED = ("from", "sender", "reply-to", "to", "cc", "date", "subject", "message-id",
-             "in-reply-to", "references", "followup-to", "mail-followup-to")
+# En-têtes extérieurs autorisés (D9) : tous les autres n'existent plus que dans
+# la partie chiffrée. Message-ID, In-Reply-To et References sont pseudonymisés.
+OUTER_ALLOWED = ("from", "to", "cc", "date", "subject", "mime-version", "content-type",
+                 "message-id", "in-reply-to", "references", "reply-to", "auto-submitted")
+MSGID_HEADERS = ("message-id", "in-reply-to", "references")
+MSGID_RE = re.compile(rb"<([^<>]+)>")
+MAX_REFERENCES = 10   # premier identifiant (racine du fil) + 9 derniers (RFC 5322 § 3.6.4)
 # En-têtes qui décrivent l'entité MIME d'origine : ils passent dans la partie chiffrée.
 CONTENT = ("content-type", "content-transfer-encoding", "content-disposition",
            "content-description", "content-id", "content-language", "content-location",
@@ -58,9 +66,9 @@ def encode_subject(text: str) -> str:
 
 
 def build_inner(headers: list[tuple[str, bytes]], body: bytes, boundary: str | None = None) -> bytes:
-    """Partie MIME à chiffrer : en-têtes protégés + entité MIME d'origine."""
+    """Partie MIME à chiffrer : tous les en-têtes d'origine (protégés) + entité MIME d'origine."""
     boundary = boundary or new_boundary()
-    protected = [header_line(n, v) for n, v in headers if n.lower() in PROTECTED]
+    protected = [header_line(n, v) for n, v in headers if n.lower() not in CONTENT]
     content = [header_line(n, v) for n, v in headers if n.lower() in CONTENT]
     if not any(n.lower() == "content-type" for n, _ in headers):
         content.insert(0, header_line("Content-Type", DEFAULT_CONTENT_TYPE))
@@ -92,41 +100,87 @@ def build_encrypted_body(armored: bytes, boundary: str) -> bytes:
     ])
 
 
-def outer_header_changes(headers: list[tuple[str, bytes]], neutral_subject: str, boundary: str):
-    """Modifications des en-têtes extérieurs : liste de (opération, nom, index, valeur).
+def pseudonymize_ids(value: bytes, key: bytes, domain: str, limit: int = MAX_REFERENCES) -> str:
+    """Identifiants de message pseudonymisés : <hmac@domaine>, séparés par une espace.
 
-    opération : "change" (index = n-ième occurrence, 1-based ; valeur None =
-    suppression) ou "add". L'objet devient neutre, le type devient
-    multipart/encrypted, les autres en-têtes Content-* disparaissent.
+    Même identifiant d'origine => même pseudonyme (le fil est conservé dans
+    Thunderbird), sans le nom d'hôte interne ni rien de devinable sans la clé.
+    Au-delà de `limit` identifiants, on garde le premier et les derniers.
+    Chaîne vide si la valeur ne contient aucun identifiant.
     """
-    ops = []
-    counts: dict[str, int] = {}
-    seen_subject = seen_ctype = seen_mime = False
-    for name, _ in headers:
+    ids = [re.sub(rb"\s+", b"", m) for m in MSGID_RE.findall(value)]
+    if len(ids) > limit:
+        ids = ids[:1] + ids[-(limit - 1):]
+    return " ".join(f"<{hmac.new(key, i, hashlib.sha256).hexdigest()[:32]}@{domain}>" for i in ids)
+
+
+def random_message_id(domain: str) -> str:
+    return f"<{secrets.token_hex(16)}@{domain}>"
+
+
+def build_outer_headers(headers: list[tuple[str, bytes]], neutral_subject: str, boundary: str,
+                        key: bytes, domain: str) -> bytes:
+    """En-têtes extérieurs (bloc terminé par CRLF, sans la ligne vide).
+
+    Seuls les en-têtes de OUTER_ALLOWED subsistent, dans l'ordre d'origine ;
+    l'objet devient neutre, le type multipart/encrypted, les identifiants de
+    message sont pseudonymisés (un Message-ID aléatoire est ajouté s'il manque).
+    """
+    replaced = {
+        "subject": " " + encode_subject(neutral_subject),
+        "content-type": " " + outer_content_type(boundary),
+        "mime-version": " 1.0",
+    }
+    canonical = {"subject": "Subject", "content-type": "Content-Type", "mime-version": "MIME-Version",
+                 "message-id": "Message-ID", "in-reply-to": "In-Reply-To", "references": "References"}
+    out: list[bytes] = []
+    done: set[str] = set()
+    for name, value in headers:
         low = name.lower()
-        counts[low] = counts.get(low, 0) + 1
-    # Les suppressions se font de la dernière occurrence vers la première, pour
-    # que les index restent valides.
-    for low, n in counts.items():
-        name = next(h for h, _ in headers if h.lower() == low)
-        if low == "subject":
-            seen_subject = True
-            ops.append(("change", name, 1, " " + encode_subject(neutral_subject)))
-            ops += [("change", name, i, None) for i in range(n, 1, -1)]
-        elif low == "content-type":
-            seen_ctype = True
-            ops.append(("change", name, 1, " " + outer_content_type(boundary)))
-            ops += [("change", name, i, None) for i in range(n, 1, -1)]
-        elif low in CONTENT:
-            ops += [("change", name, i, None) for i in range(n, 0, -1)]
-        elif low == "mime-version":
-            seen_mime = True
-            ops.append(("change", name, 1, " 1.0"))
-            ops += [("change", name, i, None) for i in range(n, 1, -1)]
-    if not seen_mime:
-        ops.append(("add", "MIME-Version", 0, " 1.0"))
-    if not seen_subject:
-        ops.append(("add", "Subject", 0, " " + encode_subject(neutral_subject)))
-    if not seen_ctype:
-        ops.append(("add", "Content-Type", 0, " " + outer_content_type(boundary)))
-    return ops
+        if low not in OUTER_ALLOWED or low in done:
+            continue
+        if low in replaced:
+            out.append(header_line(canonical[low], replaced[low].encode()))
+            done.add(low)
+        elif low in MSGID_HEADERS:
+            done.add(low)   # un seul exemplaire, pseudonymisé ; supprimé s'il est invalide
+            pseudo = pseudonymize_ids(value, key, domain)
+            if pseudo:
+                out.append(header_line(canonical[low], (" " + pseudo).encode()))
+                done.add(low + ":ok")
+        else:
+            out.append(header_line(name, value))
+    for low in ("mime-version", "subject", "content-type"):
+        if low not in done:
+            out.append(header_line(canonical[low], replaced[low].encode()))
+    if "message-id:ok" not in done:
+        out.append(header_line("Message-ID", (" " + random_message_id(domain)).encode()))
+    return b"".join(out)
+
+
+HEADER_NAME = re.compile(rb"^[!-9;-~]+$")   # RFC 5322 : caractères imprimables sauf « : »
+
+
+def parse_message(data: bytes) -> tuple[list[tuple[str, bytes]], bytes]:
+    """(en-têtes, corps) d'un message brut. Valeurs brutes : espace initiale et
+    pliage conservés. Une ligne qui n'est ni un en-tête ni une continuation
+    termine les en-têtes (comme Postfix)."""
+    data = crlf(data)
+    headers: list[tuple[str, bytes]] = []
+    pos = 0
+    while pos < len(data):
+        end = data.find(b"\r\n", pos)
+        end = len(data) if end < 0 else end
+        line = data[pos:end]
+        if line == b"":
+            return headers, data[end + 2:]
+        if line[:1] in (b" ", b"\t") and headers:
+            name, value = headers[-1]
+            headers[-1] = (name, value + b"\r\n" + line)
+        else:
+            name, sep, value = line.partition(b":")
+            if not sep or not HEADER_NAME.match(name):
+                return headers, data[pos:]
+            headers.append((name.decode("ascii"), value))
+        pos = end + 2
+    return headers, b""

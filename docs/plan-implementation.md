@@ -1,7 +1,7 @@
 # Plan d'implémentation : relais SMTP applicatif chiffrant (OpenPGP)
 
 > Statut : **validé le 2026-10-25 (toutes les décisions D1 à D12 acceptées)**. Implémentation lot par lot, un commit poussé par lot.
-> Avancement : lots 0 à 3 terminés.
+> Avancement : lots 0 à 4 terminés.
 > Base : branche `claude/vigilant-mccarthy-kgzh0e` (relai Postfix, liste blanche IP,
 > TLS + SASL vers le fournisseur, 19 tests d'intégration verts).
 > Branche de travail : `claude/gallant-shannon-7yirrk`.
@@ -46,7 +46,7 @@ flowchart LR
             OUT["client smtp<br/>TLS vérifié + SASL"]
             EXP["exporteur /metrics"]
         end
-        GW["gateway (milter Python)<br/>1. en-tête From lié au login<br/>2. quota horaire<br/>3. contrôle du contenu<br/>4. clé du destinataire (WKD)<br/>5. chiffrement PGP/MIME<br/>6. nettoyage des en-têtes"]
+        GW["gateway (milter + filtre avant file, Python)<br/>1. en-tête From lié au login<br/>2. quota horaire<br/>3. contrôle du contenu<br/>4. clé du destinataire (WKD)<br/>5. chiffrement PGP/MIME<br/>6. nettoyage des en-têtes"]
         KD["keydir (HTTPS)<br/>dépôt · validation admin<br/>WKD · révocation"]
     end
     subgraph NET["Internet"]
@@ -56,7 +56,7 @@ flowchart LR
     TB["Thunderbird<br/>clé privée locale"]
 
     GL & JK & GP & YT -- "587 STARTTLS + AUTH" --> SUB
-    SUB <-- "milter (avant file)" --> GW
+    SUB <-- "milter + filtre avant file<br/>(réinjection du chiffré)" --> GW
     GW -- "HTTPS WKD" --> KD
     SUB --> Q --> OUT -- "587/465 TLS + SASL" --> SH --> BAL
     TB -- "IMAPS 993" --> BAL
@@ -71,9 +71,22 @@ Conteneurs (une responsabilité chacun) :
 | `gateway` | `gateway/` (nouvelle) Python 3.14 + `python3-milter` + GnuPG | Moteur de politiques (quotas, contenu) et passerelle de chiffrement, appelés par Postfix **avant** l'écriture en file. |
 | `keydir` | `keydir/` (nouvelle) Python 3.14 + GnuPG + SQLite | Annuaire de clés publiques : dépôt HTTPS, validation par un administrateur, publication WKD, révocations. |
 
-Le message n'est jamais écrit en clair dans la file : le milter remplace le contenu
-avant que Postfix l'accepte (`250 queued`). Si la passerelle ne répond pas,
-`milter_default_action = tempfail` renvoie une erreur temporaire à l'application.
+Le message n'est jamais écrit en clair dans la file. Le milter contrôle
+l'enveloppe (identité au `MAIL FROM`, clé au `RCPT TO`) ; le contenu est relayé
+en temps réel à la passerelle (`smtpd_proxy_filter`), qui le chiffre et le
+réinjecte dans le relai (port interne réservé à son IP) : seul le chiffré est
+écrit dans la file, et l'application reçoit `250 queued` une fois le message
+chiffré en file. Si la passerelle ne répond pas, `milter_default_action =
+tempfail` renvoie une erreur temporaire à l'application.
+
+**Ajusté au lot 4** : au lot 3, le milter remplaçait le corps et les en-têtes.
+Or Postfix écrit le message dans la file pendant la réception, et un milter
+qui modifie le message ne fait qu'écraser en partie les anciens
+enregistrements : des fragments en clair (fin de l'objet, des en-têtes
+supprimés, du corps) restaient dans le fichier de file. Le repli prévu
+(risque « Robustesse de python3-milter ») est donc devenu la règle : filtre
+avant file pour le contenu, milter pour l'enveloppe. IT3.11c contrôle le
+fichier brut de la file.
 
 ---
 
@@ -165,7 +178,7 @@ en IMAPS dans la BAL Dovecot.
 - `RCPT TO` : recherche de la clé (WKD + cache), contrôle de validité, refus sinon.
 - Fin de message : partie interne MIME avec en-têtes protégés, chiffrement GnuPG
   pour tous les destinataires, remplacement du corps et des en-têtes, objet neutre.
-- Postfix : `smtpd_milters`, `milter_default_action = tempfail`, délais.
+- Postfix : `smtpd_milters`, `milter_default_action = tempfail`, délais ; depuis le lot 4, `smtpd_proxy_filter` et port de réinjection.
 
 | Test | Attendu |
 |---|---|
@@ -179,8 +192,9 @@ en IMAPS dans la BAL Dovecot.
 | IT3.8 | Annuaire arrêté, cache vide : `451`, rien de livré |
 | IT3.9 | Après rotation, le message suivant n'est déchiffrable qu'avec la nouvelle clé |
 | IT3.10 | Destinataire externe avec clé validée : livré chiffré ; sans clé : refusé |
-| IT3.11 | Fournisseur arrêté, message en file : le fichier de file (`postcat`) ne contient que du chiffré |
+| IT3.11 | Fournisseur arrêté, message en file : le fichier de file (`postcat`) ne contient que du chiffré ; le fichier brut ne contient aucun fragment de l'objet, du corps ni des en-têtes d'origine (ajouté au lot 4) |
 | IT3.12 | Objet UTF-8 (RFC 2047), pièces jointes binaires et message proche de la taille maximale : aller-retour exact |
+| IT3.13 | Port de réinjection : fermé côté VLAN Applications, refusé depuis une autre machine du réseau backend (ajouté au lot 4) |
 
 ### Lot 4 : nettoyage des en-têtes
 
@@ -189,6 +203,7 @@ en IMAPS dans la BAL Dovecot.
 | IT4.1 | En-têtes extérieurs du message en BAL ⊆ liste blanche ; aucune IP `10.0.x.x`, aucun nom d'hôte interne, aucun `X-GitLab-*` ; ces en-têtes sont présents dans la partie déchiffrée |
 | IT4.2 | Deux notifications du même fil : `References` pseudonymisés identiques, fil conservé |
 | IT4.3 | Aucun `Received` ne révèle la topologie interne |
+| IT4.4 | Secret `gateway_hmac_key` absent ou trop court : démarrage refusé |
 
 ### Lot 5 : quotas
 
@@ -244,6 +259,6 @@ en IMAPS dans la BAL Dovecot.
 | Affichage des en-têtes protégés dans Thunderbird | Structure MIME conforme à celle produite par Thunderbird ; vérification manuelle dans Thunderbird pendant la recette |
 | Destinataires masqués et RNP | RNP 0.18 n'essaie que le premier destinataire masqué : identifiants masqués réservés aux messages à destinataire unique (D4). Recette : vérifier dans Thunderbird le déchiffrement d'un message à destinataire unique (identifiant masqué) et d'un message à plusieurs destinataires |
 | Taille du message chiffré | L'armure ASCII grossit le message : `cleanup` accepte 1,5 × `MESSAGE_SIZE_LIMIT` (la limite annoncée aux applications reste `MESSAGE_SIZE_LIMIT`) ; la limite du fournisseur doit être au moins égale à 1,5 × `MESSAGE_SIZE_LIMIT` |
-| Robustesse de `python3-milter` | Paquet Ubuntu maintenu ; repli possible sur `smtpd_proxy_filter` (même passerelle, autre transport) |
+| Robustesse de `python3-milter` | Paquet Ubuntu maintenu ; le contenu passe depuis le lot 4 par `smtpd_proxy_filter` (le milter ne garantissait pas l'absence de clair dans la file), le milter ne sert plus qu'aux contrôles d'enveloppe |
 | Lecture des logs Postfix par l'exporteur | Prototype dès le lot 7 (FIFO ou fichier tmpfs relu) avant d'en dépendre |
 | Limite de débit Docker Hub pendant les constructions | Images de base mises en cache, nouvelles tentatives |

@@ -93,3 +93,16 @@ def check_from_headers(app, values: list[str]) -> Refusal | None:
         if found.lower() != app.address:
             return Refusal("550", "5.7.1", "From: display name must not contain another address", "from-display-spoof")
     return None
+
+
+def resolve_sender(inventory, mailfrom: str | None):
+    """Application dont l'adresse est l'expéditeur d'enveloppe, ou Refusal.
+
+    Utilisé par le filtre avant file, qui ne connaît pas le login SASL : le
+    milter a déjà imposé enveloppe = adresse du login au MAIL FROM.
+    """
+    sender = strip_brackets(mailfrom).lower()
+    for app in inventory.applications.values():
+        if app.address == sender:
+            return app, None
+    return None, Refusal("451", "4.7.1", "Gateway state error", "unknown-sender")

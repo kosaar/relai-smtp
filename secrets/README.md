@@ -12,6 +12,7 @@ viennent du coffre-fort de l'équipe, jamais d'un fichier versionné.
 | `relay_tls_key`         | clé privée correspondante                                    |
 | `keydir_tls_cert`       | certificat (et chaîne) de l'annuaire, pour `openpgpkey.<domaine>` (WKD) et le nom utilisé par les postes |
 | `keydir_tls_key`        | clé privée correspondante                                    |
+| `gateway_hmac_key`      | clé de pseudonymisation des identifiants de message (`Message-ID`, `References`), 32 caractères minimum ; la changer coupe les fils de discussion en cours |
 | `apps/<application>`    | mot de passe SMTP de chaque application de `config/applications.toml` (16 caractères minimum, une ligne) |
 
 ```bash
@@ -24,6 +25,8 @@ install -m 600 smtp-relay.crt secrets/relay_tls_cert
 install -m 600 smtp-relay.key secrets/relay_tls_key
 install -m 600 keydir.crt secrets/keydir_tls_cert
 install -m 600 keydir.key secrets/keydir_tls_key
+install -m 600 /dev/null secrets/gateway_hmac_key
+openssl rand -base64 48 | tr -d '\n' > secrets/gateway_hmac_key
 # Un mot de passe par application (le nom du fichier = login SMTP = nom dans l'inventaire)
 for app in gitlab jenkins glpi youtrack; do
     install -m 600 /dev/null "secrets/apps/$app"
@@ -42,6 +45,8 @@ Au démarrage, le relai :
 
 L'annuaire (`keydir`) copie son certificat et sa clé dans un tmpfs lisible par
 son seul utilisateur (`keydir`, `0600`), puis abandonne les privilèges root.
+La passerelle (`gateway`) fait de même avec `gateway_hmac_key` (`0400`,
+utilisateur `gateway`).
 
 Rotation d'un mot de passe d'application : remplacer le fichier, puis
 `docker compose restart relay` (et mettre à jour l'application).

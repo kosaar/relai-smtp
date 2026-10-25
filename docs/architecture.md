@@ -1,10 +1,10 @@
 # Architecture du relai SMTP
 
-> État actuel : lots 1 à 3 du [plan d'implémentation](plan-implementation.md)
+> État actuel : lots 1 à 4 du [plan d'implémentation](plan-implementation.md)
 > (soumission 587 authentifiée, identité par application, annuaire de clés,
-> chiffrement OpenPGP dans la passerelle avant la mise en file). Les lots
-> suivants ajoutent le nettoyage des en-têtes, les quotas, le contrôle du
-> contenu et la supervision.
+> chiffrement OpenPGP dans la passerelle avant la mise en file, nettoyage des
+> en-têtes). Les lots suivants ajoutent les quotas, le contrôle du contenu et
+> la supervision.
 
 ## Vue d'ensemble
 
@@ -23,13 +23,15 @@ flowchart LR
             direction TB
             SMTPD["submission :587<br/>STARTTLS ≥ 1.2 obligatoire<br/>AUTH (sasldb par application)"]
             ACL[/"1. IP ∈ inventaire (mynetworks)<br/>2. AUTH réussie<br/>3. MAIL FROM = adresse du login"/]
-            Q[("Volume relay-queue")]
-            SMTP["client smtp<br/>relayhost = [fournisseur]:587"]
+            RI["réinjection :10026<br/>(IP de la passerelle seule)"]
+            Q[("Volume relay-queue<br/>(chiffré uniquement)")]
+            SMTP["client smtp<br/>relayhost = [fournisseur]:587<br/>Received du relai retiré"]
             INV{{"config/applications.toml<br/>secrets/apps/&lt;nom&gt;"}}
-            SMTPD --> ACL --> Q --> SMTP
+            SMTPD --> ACL
+            RI --> Q --> SMTP
             INV -. "relay-config<br/>(au démarrage)" .-> ACL
         end
-        GW["Conteneur gateway<br/>milter Python :9900<br/>login ↔ IP ↔ From:<br/>clé du destinataire (WKD)<br/>chiffrement PGP/MIME"]
+        GW["Conteneur gateway (Python)<br/>milter :9900 : login ↔ IP, clé du destinataire (WKD)<br/>filtre avant file :10025 : From:, chiffrement PGP/MIME,<br/>en-têtes en liste blanche, Message-ID pseudonymisés"]
         KD["Conteneur keydir<br/>HTTPS :8443 (TLS ≥ 1.2)<br/>dépôt · validation admin<br/>WKD · révocations · audit"]
     end
 
@@ -41,7 +43,8 @@ flowchart LR
 
     GL & JK & GP -- "587 STARTTLS + AUTH" --> SMTPD
     UNK -- "587" --x SMTPD
-    ACL <-- "milter, avant la mise en file<br/>(réseau backend interne)" --> GW
+    ACL <-- "milter + filtre avant file<br/>(réseau backend interne)" --> GW
+    GW -- "message chiffré" --> RI
     SMTP == "587/465 TLS ≥ 1.2 vérifié<br/>AUTH SASL" ==> MTA
     TB -- "HTTPS : dépôt de clé,<br/>WKD (openpgpkey.example.com)" --> KD
     GW -- "HTTPS : WKD (cache)" --> KD
@@ -64,7 +67,8 @@ que sur le port 587 et n'est pas joignable depuis Internet.
 |---|----------------------|------|-------------|------------------|-----------|
 | 1 | Application déclarée → relai | 587/tcp | **STARTTLS obligatoire**, TLS ≥ 1.2, certificat `smtp-relay` | **SASL** PLAIN/LOGIN, un identifiant par application, après STARTTLS uniquement | IP dans l'inventaire ; login ↔ IP ; `MAIL FROM` et `From:` = adresse du login |
 | 2 | Hôte non déclaré → relai | 587/tcp | — | — | **refus** `554 5.7.1` dès la connexion + log |
-| 3 | Relai ↔ passerelle | 9900/tcp (réseau `backend` interne) | — (réseau Docker interne) | — | `milter_default_action = tempfail` : passerelle absente ⇒ erreur temporaire |
+| 3 | Relai ↔ passerelle | 9900/tcp (milter), 10025/tcp (filtre avant file) (réseau `backend` interne) | — (réseau Docker interne) | — | `milter_default_action = tempfail` : passerelle absente ⇒ erreur temporaire |
+| 3a | Passerelle → relai (réinjection) | 10026/tcp sur l'adresse backend du relai | — (réseau Docker interne) | IP de la passerelle seule (`mynetworks`) | message déjà chiffré ; aucun milter ni filtre |
 | 3b | Passerelle → annuaire | 8443/tcp (réseau `backend` interne) | HTTPS, TLS ≥ 1.2, certificat vérifié | — | WKD ; annuaire injoignable ⇒ `451 4.7.1` (échec fermé) |
 | 4 | Relai → smarthost | 587/tcp (STARTTLS) ou 465/tcp | **TLS ≥ 1.2**, certificat vérifié (`secure`) | **SASL** (secrets) | `smtp_tls_security_level` |
 | 5 | Poste → annuaire | 443/tcp (8443 dans le conteneur) | **HTTPS**, TLS ≥ 1.2, aucun port en clair | aucune (dépôt public) | clé publiée seulement après validation de l'empreinte par un administrateur ; révocation par certificat signé |
@@ -97,15 +101,18 @@ sequenceDiagram
     S->>G: RCPT
     Note over G: clé d'alice : WKD de l'annuaire (cache)<br/>absente / expirée / révoquée ⇒ 550 5.7.1 pour ce destinataire<br/>annuaire injoignable ⇒ 451 4.7.1
     App->>S: DATA
-    S->>G: en-têtes + corps
+    S->>G: transaction relayée en temps réel (filtre avant file :10025, rien n'est écrit)
     alt From: ≠ gitlab@example.com
         G-->>S: 550 5.7.1 (log : motif seulement)
         S-->>App: 550 5.7.1
     else conforme
-        Note over G: chiffrement PGP/MIME pour les destinataires acceptés<br/>(en-têtes protégés, objet extérieur neutre)
-        G-->>S: en-têtes et corps remplacés
-        S->>Q: 250 queued (file : chiffré uniquement)
-        Q->>M: STARTTLS vérifié + AUTH
+        Note over G: chiffrement PGP/MIME pour les destinataires acceptés<br/>(en-têtes protégés, objet neutre, en-têtes extérieurs<br/>en liste blanche, Message-ID pseudonymisés)
+        G->>S: réinjection du message chiffré (:10026)
+        S->>Q: mise en file (chiffré uniquement)
+        S-->>G: 250 queued as …
+        G-->>S: 250 queued as …
+        S-->>App: 250 queued as …
+        Q->>M: STARTTLS vérifié + AUTH (Received du relai retiré)
         M-->>Q: 250 → status=sent (sinon deferred, message conservé)
     end
 ```
@@ -121,7 +128,7 @@ flowchart LR
     R["relay (alias smtp-relay)<br/>10.0.1.5 / 10.0.2.5 / 10.0.3.5"]
     RB["relay-badcreds<br/>mot de passe fournisseur erroné"]
     subgraph B["réseau « backend » 10.0.3.0/24 (internal)"]
-        G["gateway .20:9900"]
+        G["gateway .20:9900 (milter), :10025 (filtre)"]
     end
     subgraph I["réseau « internet » 10.0.2.0/24 (internal)"]
         F["provider .10<br/>Postfix :587 STARTTLS + SASL<br/>→ LMTP → Dovecot (BAL)"]

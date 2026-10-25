@@ -196,8 +196,9 @@ it19 doublon "l'adresse 'gitlab@example.com' est déjà attribuée à l'applicat
 it19 secret  "application 'glpi' : secret /run/secrets/apps/glpi absent"
 it19 domaine "l'adresse 'jenkins@other.test' n'appartient pas à sender_domain 'example.com'"
 it19 quota   "quota_per_hour=0 invalide"
+cp "$WORK/secrets/gateway_hmac_key" "$bad/hmac_key" && chmod a+r "$bad/hmac_key"
 start_must_fail "IT1.9 passerelle, adresse en double" "déjà attribuée à l'application 'gitlab'" \
-    -v "$bad/doublon:/etc/relay:ro" -- "$gateway_image"
+    -v "$bad/doublon:/etc/relay:ro" -v "$bad/hmac_key:/run/secrets/gateway_hmac_key:ro" -- "$gateway_image"
 
 # --- IT1.10 : ajout d'une application (entrée + secret) puis redémarrage ----------
 subj="it110-before-${TOKEN}"

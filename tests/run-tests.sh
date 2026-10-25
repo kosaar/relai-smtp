@@ -63,6 +63,7 @@ printf 'relay-test' >"$WORK/secrets/relay_smtp_username"
 printf '%s' "$(rand 24)" >"$WORK/secrets/relay_smtp_password"
 printf '%s' "wrong-$(rand 16)" >"$WORK/secrets/relay_smtp_password_bad"
 printf '%s' "$(rand 24)" >"$WORK/secrets/mailbox_password"
+printf '%s' "$(rand 48)" >"$WORK/secrets/gateway_hmac_key"
 # Inventaire de test (modifiable par les suites) et un secret par application.
 mkdir -p "$WORK/config" "$WORK/secrets/apps"
 cp tests/fixtures/applications.toml "$WORK/config/applications.toml"

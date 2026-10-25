@@ -1,13 +1,25 @@
 #!/usr/bin/python3
-# Healthcheck Docker de la passerelle : le port du milter accepte les connexions.
+# Healthcheck Docker de la passerelle : le milter accepte les connexions et le
+# filtre avant file répond par une bannière SMTP 220.
 import os
 import socket
 import sys
 
-port = int(os.environ.get("GATEWAY_HEALTH_PORT", "9900"))
+milter = int(os.environ.get("GATEWAY_HEALTH_PORT", "9900"))
+filt = int(os.environ.get("GATEWAY_PROXY_LISTEN", "0.0.0.0:10025").rpartition(":")[2])
 try:
-    socket.create_connection(("127.0.0.1", port), timeout=3).close()
+    socket.create_connection(("127.0.0.1", milter), timeout=3).close()
 except OSError as e:
-    print(f"milter injoignable sur le port {port} : {e}")
+    print(f"milter injoignable sur le port {milter} : {e}")
+    sys.exit(1)
+try:
+    with socket.create_connection(("127.0.0.1", filt), timeout=3) as s:
+        banner = s.makefile("rb").readline()
+        s.sendall(b"QUIT\r\n")
+except OSError as e:
+    print(f"filtre avant file injoignable sur le port {filt} : {e}")
+    sys.exit(1)
+if not banner.startswith(b"220"):
+    print(f"filtre avant file : bannière inattendue {banner!r}")
     sys.exit(1)
 print("ok")

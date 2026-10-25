@@ -91,6 +91,28 @@ configure() {
     [[ $RELAY_MILTER =~ ^inet:[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] \
         || die "RELAY_MILTER='${RELAY_MILTER}' invalide (ex. inet:gateway:9900)."
 
+    # Filtre avant file (passerelle) et port de réinjection. Le port de
+    # réinjection écoute sur l'adresse locale qui joint la passerelle (réseau
+    # backend) et n'accepte que l'IP de la passerelle, résolue au démarrage.
+    RELAY_PROXY_FILTER=${RELAY_PROXY_FILTER:-gateway:10025}
+    [[ $RELAY_PROXY_FILTER =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] \
+        || die "RELAY_PROXY_FILTER='${RELAY_PROXY_FILTER}' invalide (ex. gateway:10025)."
+    REINJECT_PORT=${RELAY_REINJECT_PORT:-10026}
+    [[ $REINJECT_PORT =~ ^[0-9]{1,5}$ && $REINJECT_PORT != 587 ]] \
+        || die "RELAY_REINJECT_PORT='${REINJECT_PORT}' invalide."
+    local gw_host=${RELAY_PROXY_FILTER%:*} try
+    GATEWAY_IP=
+    for try in $(seq 1 30); do
+        GATEWAY_IP=$(getent ahostsv4 "$gw_host" | awk 'NR == 1 { print $1 }') || true
+        [[ -n $GATEWAY_IP ]] && break
+        (( try < 30 )) && sleep 1
+    done
+    [[ -n $GATEWAY_IP ]] || die "passerelle '${gw_host}' introuvable (DNS) : impossible de configurer la réinjection."
+    REINJECT_ADDRESS=$(python3 -c 'import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect((sys.argv[1], 9))
+print(s.getsockname()[0])' "$GATEWAY_IP") || die "aucune route vers la passerelle (${GATEWAY_IP})."
+
     # ---- Limitation des tentatives d'authentification (par IP et par minute)
     RELAY_AUTH_RATE_LIMIT=${RELAY_AUTH_RATE_LIMIT:-30}
     [[ $RELAY_AUTH_RATE_LIMIT =~ ^[0-9]+$ ]] && (( RELAY_AUTH_RATE_LIMIT >= 1 )) \
@@ -147,6 +169,8 @@ generate() {
     cp -a /usr/local/share/postfix-dist/. "$PF/"
     render "$TEMPLATES/main.cf.tmpl" "$PF/main.cf"
     render "$TEMPLATES/master.cf.tmpl" "$PF/master.cf"
+    install -m 0644 "$TEMPLATES/smtp_header_checks" "$PF/smtp_header_checks"
+    printf '%s\n' "$GATEWAY_IP" >"$PF/gateway_ip"   # contrôlé par le healthcheck
 
     # Applications : sender_login_maps, mynetworks (liste blanche IP) et base
     # SASL (realm = myhostname, car smtpd_sasl_local_domain est vide).
@@ -184,7 +208,8 @@ summary() {
     log "Relai SMTP ${RELAY_HOSTNAME} : soumission :587 (STARTTLS >= TLSv1.2 obligatoire + SASL par application)"
     log "${INVENTORY_SUMMARY%%$'\n'*}"
     log "Seules les IP de l'inventaire peuvent se connecter ; chaque login n'envoie qu'avec son adresse."
-    log "Passerelle (milter) : ${RELAY_MILTER} (injoignable => 451, rien n'est accepté)"
+    log "Passerelle : milter ${RELAY_MILTER}, filtre avant file ${RELAY_PROXY_FILTER} (injoignable => 4xx, rien n'est accepté)"
+    log "Réinjection des messages chiffrés : ${REINJECT_ADDRESS}:${REINJECT_PORT}, depuis ${GATEWAY_IP} uniquement"
     log "Relayhost : [${RELAY_HOST}]:${RELAY_PORT} TLS=${RELAY_TLS_SECURITY_LEVEL} wrappermode=${RELAY_TLS_WRAPPERMODE} >=TLSv1.2, SASL user=${RELAY_SMTP_USERNAME}"
 }
 

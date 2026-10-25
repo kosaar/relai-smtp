@@ -8,8 +8,10 @@ Jenkins, GLPI, YouTrack…). Chaque application :
 - n'envoie que depuis **ses IP** déclarées et avec **son adresse** expéditrice.
 
 Les messages sont contrôlés puis **chiffrés en OpenPGP pour leurs
-destinataires** par une passerelle (milter) **avant** d'être mis en file : rien
-n'est jamais écrit ni transmis en clair. Un destinataire sans clé validée dans
+destinataires** par une passerelle **avant** d'être mis en file : Postfix lui
+relaie chaque transaction en temps réel (filtre avant file), et seul le message
+chiffré revient dans la file. Rien n'est jamais écrit ni transmis en clair, et
+les en-têtes extérieurs sont réduits au strict nécessaire. Un destinataire sans clé validée dans
 l'annuaire est refusé. Les messages chiffrés sont transmis au MTA d'un
 fournisseur cloud (AWS SES, SendGrid, Mailjet, Brevo…) en **TLS ≥ 1.2 vérifié
 avec authentification SASL**, et lus dans Thunderbird avec la clé privée du
@@ -18,7 +20,7 @@ destinataire.
 ```
 GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Postfix ──587/465 TLS + SASL──▶ fournisseur ──▶ BAL ──IMAPS──▶ Thunderbird
                                                               │  ▲                                                       (clé privée)
-                                                     milter   ▼  │  (avant mise en file : message chiffré)
+                                   milter + filtre avant file ▼  │  (réinjection du message chiffré)
                                                            passerelle ──HTTPS (WKD)──▶ annuaire de clés ◀──HTTPS (dépôt)── Thunderbird
 ```
 
@@ -71,7 +73,7 @@ relay/Dockerfile          image du relai (contexte de construction : racine du d
 relay/entrypoint.sh       validation de la configuration, génération de /etc/postfix, lancement
 relay/config/*.tmpl       templates de main.cf, master.cf et de la configuration SASL
 relay/scripts/            bibliothèque commune, healthcheck
-gateway/                  passerelle (milter Python) appelée par Postfix avant la mise en file
+gateway/                  passerelle Python appelée par Postfix avant la mise en file (milter + filtre SMTP)
 keydir/                   annuaire de clés publiques OpenPGP (dépôt HTTPS, validation, WKD, révocations)
 test/provider/            fournisseur simulé (Postfix 587 TLS + SASL -> Dovecot IMAPS) et PKI de test
 test/workstation/         poste destinataire simulé (RNP, GnuPG, relève IMAPS), test uniquement
@@ -95,7 +97,7 @@ pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_T
 | Image | Paquets Ubuntu | Rôle |
 |-------|----------------|------|
 | `relay` | `postfix`, `libsasl2-modules` (PLAIN/LOGIN), `libsasl2-modules-db` et `sasl2-bin` (base SASL des applications), `python3` (`relay-config`), `ca-certificates` | relai de production |
-| `gateway` | `python3`, `python3-milter`, `gpg` (chiffrement, clés publiques seulement), `ca-certificates` | passerelle de production (milter), exécutée sous un utilisateur non privilégié |
+| `gateway` | `python3`, `python3-milter`, `gpg` (chiffrement, clés publiques seulement), `ca-certificates` | passerelle de production (milter et filtre avant file), exécutée sous un utilisateur non privilégié |
 | `keydir` | `python3` (serveur HTTPS, SQLite), `gpg` (lecture des clés publiques) | annuaire de clés de production, exécuté sous un utilisateur non privilégié |
 | `test/provider` | `postfix`, `sasl2-bin`, `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
 | `test/workstation` | `rnp`, `gnupg`, `gpg-wks-client`, `curl`, `openssl`, `python3` | simule le poste d'un destinataire (rôle de Thunderbird) : outils `mailbox` (IMAPS) et `keys` (clés RNP, annuaire) |
@@ -116,7 +118,7 @@ Bonnes pratiques appliquées dans les Dockerfiles :
 ### Entrypoint du relai (`relay/entrypoint.sh`)
 
 1. **Inventaire.** `relay-config check` valide `config/applications.toml` et les secrets des applications (voir section 3). La moindre erreur arrête le conteneur (code 1) avec des lignes `FATAL: …`, toutes les erreurs étant listées ensemble.
-2. **Reste de la configuration.** Certificat de soumission (lisible, clé correspondante), passerelle, fournisseur, niveau TLS, taille maximale, durée de file. Le relai ne démarre jamais en mode dégradé ou ouvert.
+2. **Reste de la configuration.** Certificat de soumission (lisible, clé correspondante), passerelle (son adresse est résolue au démarrage : le port de réinjection n'accepte qu'elle), fournisseur, niveau TLS, taille maximale, durée de file. Le relai ne démarre jamais en mode dégradé ou ouvert.
 3. **Génération de `/etc/postfix`** (tmpfs, le système de fichiers racine est en lecture seule) :
    - `main.cf` et `master.cf` à partir des templates ;
    - `relay-config postfix` génère `sender_login_maps` (adresse → login), `mynetworks` (IP de l'inventaire, en `/32` ou `/128`) et la base SASL `sasl/sasldb2` (`root:postfix 0640`), **reconstruite à chaque démarrage** ;
@@ -126,26 +128,46 @@ Bonnes pratiques appliquées dans les Dockerfiles :
 
 ### Passerelle (`gateway/`)
 
-Postfix appelle la passerelle (`smtpd_milters = inet:gateway:9900`) pour chaque
-message, **avant** de répondre `250 queued`. Elle lit l'inventaire et :
+La passerelle est appelée par Postfix de deux façons, **avant** toute écriture
+dans la file :
+
+- **milter** (`smtpd_milters = inet:gateway:9900`) : contrôles de l'enveloppe,
+  au `MAIL FROM` et à chaque `RCPT TO` ;
+- **filtre avant file** (`smtpd_proxy_filter = gateway:10025`) : Postfix lui
+  relaie la transaction en temps réel, sans rien écrire ; la passerelle chiffre
+  le message et le **réinjecte** dans le relai (port `10026`, sur le réseau
+  backend, ouvert à la seule IP de la passerelle), puis rend à l'application
+  la réponse de la réinjection (`250 … queued as …`).
+
+Un milter ne suffit pas pour le chiffrement : Postfix écrit le message dans la
+file pendant la réception et, quand un milter remplace le corps ou supprime un
+en-tête, l'ancien enregistrement n'est qu'en partie écrasé (des fragments en
+clair restent dans le fichier ; vérifié par IT3.11c).
 
 | Étape | Contrôle | Refus |
 |-------|----------|-------|
-| `MAIL FROM` | login SASL connu (`{auth_authen}`) | `550 5.7.1` |
-| `MAIL FROM` | IP du client déclarée pour **ce** login (`client_ips`) | `550 5.7.1` (`client-ip-mismatch`) |
-| `MAIL FROM` | enveloppe = adresse du login, expéditeur nul refusé | `553 5.7.1` / `550 5.7.1` |
-| `RCPT TO` | clé OpenPGP **valide** du destinataire, lue dans le WKD de l'annuaire (HTTPS vérifié, cache `GATEWAY_KEY_CACHE_TTL`) : ni absente, ni expirée, ni révoquée, avec une sous-clé de chiffrement | `550 5.7.1 No valid OpenPGP key` **pour ce destinataire** (`no-key`, `key-expired`, `key-revoked`, `key-unusable`) ; annuaire injoignable : `451 4.7.1` |
-| fin du message | un seul en-tête `From:`, une seule adresse, égale à celle du login ; le nom affiché ne contient pas une autre adresse | `550 5.7.1` (`from-mismatch`, `from-multiple`, `from-invalid`, `from-display-spoof`) |
-| fin du message | **chiffrement** PGP/MIME pour tous les destinataires acceptés (voir ci-dessous) | erreur interne : `451 4.7.1` |
+| `MAIL FROM` (milter) | login SASL connu (`{auth_authen}`) | `550 5.7.1` |
+| `MAIL FROM` (milter) | IP du client déclarée pour **ce** login (`client_ips`) | `550 5.7.1` (`client-ip-mismatch`) |
+| `MAIL FROM` (milter) | enveloppe = adresse du login, expéditeur nul refusé | `553 5.7.1` / `550 5.7.1` |
+| `RCPT TO` (milter) | clé OpenPGP **valide** du destinataire, lue dans le WKD de l'annuaire (HTTPS vérifié, cache `GATEWAY_KEY_CACHE_TTL`) : ni absente, ni expirée, ni révoquée, avec une sous-clé de chiffrement | `550 5.7.1 No valid OpenPGP key` **pour ce destinataire** (`no-key`, `key-expired`, `key-revoked`, `key-unusable`) ; annuaire injoignable : `451 4.7.1` |
+| fin du message (filtre) | IP du client (transmise par `XFORWARD`) déclarée pour l'application de l'enveloppe | `550 5.7.1` |
+| fin du message (filtre) | un seul en-tête `From:`, une seule adresse, égale à celle de l'application ; le nom affiché ne contient pas une autre adresse | `550 5.7.1` (`from-mismatch`, `from-multiple`, `from-invalid`, `from-display-spoof`) |
+| fin du message (filtre) | **chiffrement** PGP/MIME pour tous les destinataires acceptés, en-têtes extérieurs nettoyés (voir ci-dessous), réinjection | erreur interne : `451 4.7.1` ; réinjection impossible : `451 4.3.0` |
 
-Le message est remplacé **avant** la mise en file : la file de Postfix ne
-contient que du chiffré (`postcat` ne montre ni l'objet ni le corps). Chaque
-refus est un échec fermé : jamais d'envoi en clair, jamais d'entrée de cache
-expirée réutilisée quand l'annuaire est injoignable. Si la passerelle est
-arrêtée, Postfix répond par une erreur temporaire (`454 4.3.0`,
-`milter_default_action = tempfail`) et l'application réessaie. Les journaux de
-la passerelle ne contiennent que des métadonnées (identifiant de file, IP,
-login, destinataire, motif, tailles), jamais le contenu ni les en-têtes.
+La file de Postfix ne contient que du chiffré, y compris octet par octet dans
+le fichier brut. Chaque refus est un échec fermé : jamais d'envoi en clair,
+jamais d'entrée de cache expirée réutilisée quand l'annuaire est injoignable.
+Si la passerelle est arrêtée, Postfix répond par une erreur temporaire
+(`454 4.3.0`, `milter_default_action = tempfail`) et l'application réessaie.
+Les journaux de la passerelle ne contiennent que des métadonnées (identifiant
+de file, IP, login, destinataire, motif, tailles), jamais le contenu ni les
+en-têtes.
+
+La passerelle démarre en root le temps de copier `gateway_hmac_key` dans un
+tmpfs lisible par son seul utilisateur, puis s'exécute sous l'utilisateur
+`gateway`, sans aucune capacité. Elle refuse de démarrer (`FATAL`) si
+l'inventaire, l'annuaire, la clé HMAC (32 caractères minimum) ou un port sont
+invalides.
 
 **Format chiffré** (PGP/MIME, RFC 3156, lu par Thunderbird) :
 
@@ -155,7 +177,7 @@ Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"
   ├─ application/pgp-encrypted                (Version: 1)
   └─ application/octet-stream (encrypted.asc) <- message OpenPGP (GnuPG)
        └─ multipart/mixed; protected-headers="v1"
-            Subject / From / To / Cc / Date / Message-ID…   <- en-têtes protégés (objet réel)
+            Subject / From / To / Message-ID / X-GitLab-* / Received…  <- TOUS les en-têtes d'origine (protégés)
             └─ entité MIME d'origine, intacte (texte, pièces jointes)
 ```
 
@@ -169,8 +191,27 @@ Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"
   peut atteindre 1,5 × cette taille en file (armure ASCII) : la limite du
   fournisseur doit le permettre.
 
-Les lots suivants y ajoutent le nettoyage des en-têtes extérieurs, les quotas
-et le contrôle du contenu.
+**En-têtes extérieurs** (D9), seuls visibles du fournisseur et des serveurs
+intermédiaires : une liste blanche, `From`, `To`, `Cc`, `Date`, `Subject`
+(neutre), `MIME-Version`, `Content-Type`, `Message-ID`, `In-Reply-To`,
+`References`, `Reply-To`, `Auto-Submitted`. Tous les autres (`X-GitLab-*`,
+`X-Jenkins-*`, `X-Mailer`, `User-Agent`, `Received` d'origine…) n'existent plus
+que dans la partie chiffrée.
+
+- `Message-ID`, `In-Reply-To` et `References` sont **pseudonymisés** :
+  `<HMAC-SHA256(clé, identifiant)[:32]@sender_domain>`, avec la clé secrète
+  `gateway_hmac_key`. Le nom d'hôte interne disparaît ; un même identifiant
+  donne toujours le même pseudonyme, donc les fils de discussion restent
+  regroupés dans Thunderbird (au-delà de 10 références : la première et les
+  9 dernières). Un `Message-ID` absent ou invalide est remplacé par un
+  identifiant aléatoire.
+- Le `Received` ajouté par le relai (nom et IP de l'application) est retiré
+  en sortie (`smtp_header_checks`).
+
+Changer `gateway_hmac_key` change tous les pseudonymes : les fils en cours
+sont alors coupés en deux dans Thunderbird.
+
+Les lots suivants ajoutent les quotas et le contrôle du contenu.
 
 ### Annuaire de clés (`keydir/`)
 
@@ -215,7 +256,7 @@ docker compose exec keydir keydir-admin audit
 
 | Paramètre | Valeur | Pourquoi |
 |-----------|--------|----------|
-| `master.cf` | service `submission` (587) seul | **pas de port 25** ; services minimaux, `chroot = n` |
+| `master.cf` | service `submission` (587) pour les applications, port de réinjection (`RELAY_REINJECT_PORT`, 10026) sur l'adresse backend | **pas de port 25** ; services minimaux, `chroot = n` |
 | `smtpd_tls_security_level` | `encrypt` | STARTTLS obligatoire : `530 5.7.0 Must issue a STARTTLS command first` sinon |
 | `smtpd_tls_protocols`, `smtpd_tls_mandatory_protocols`, `smtpd_tls_ciphers` | `>=TLSv1.2`, `high` | TLS 1.0 et 1.1 refusés dès la poignée de main |
 | `smtpd_tls_auth_only` | `yes` | AUTH n'est proposé qu'après STARTTLS : aucun mot de passe en clair |
@@ -224,7 +265,10 @@ docker compose exec keydir keydir-admin audit
 | `mynetworks` + `smtpd_client_restrictions` | IP de l'inventaire ; `permit_mynetworks, reject` | liste blanche IP en défense en profondeur : toute autre IP est refusée dès la bannière (`smtpd_delay_reject = no`), avant même l'authentification |
 | `smtpd_sender_login_maps` + `reject_sender_login_mismatch` | `texthash:sender_login_maps` | `553 5.7.1 … not owned by user gitlab` si un login utilise l'adresse d'un autre ; `not logged in` sans authentification |
 | `smtpd_relay_restrictions`, `smtpd_recipient_restrictions` | `permit_sasl_authenticated, reject` | être dans `mynetworks` **ne suffit pas** pour relayer |
-| `smtpd_milters`, `milter_default_action` | `inet:gateway:9900`, `tempfail` | passerelle obligatoire avant la mise en file |
+| `smtpd_milters`, `milter_default_action` | `inet:gateway:9900`, `tempfail` | contrôles d'enveloppe de la passerelle obligatoires |
+| `smtpd_proxy_filter` (service 587) | `gateway:10025` | contenu relayé en temps réel à la passerelle, qui chiffre puis réinjecte : rien n'est écrit en clair |
+| port de réinjection | `mynetworks` = IP de la passerelle, sans milter ni filtre, `message_size_limit` = 1,5 × `MESSAGE_SIZE_LIMIT` | seuls les messages chiffrés de la passerelle entrent dans la file |
+| `smtp_header_checks` | `/^Received:/ IGNORE` | le `Received` ajouté par le relai ne sort pas |
 | `mydestination`, `relay_domains`, `local_transport = error` | vides / `error` | aucune réception entrante ni livraison locale |
 | `disable_vrfy_command`, `smtpd_helo_required`, `smtpd_banner` | `yes`, `yes`, `$myhostname ESMTP` | pas d'énumération d'adresses, pas de version du logiciel exposée |
 | `relayhost` | `[RELAY_HOST]:RELAY_PORT` | les crochets désactivent la recherche MX : on contacte exactement l'hôte indiqué |
@@ -289,6 +333,7 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 | `GATEWAY_KEYDIR_CA_FILE` | autorité(s) de confiance pour le certificat de l'annuaire, vue de la passerelle | `/etc/ssl/certs/ca-certificates.crt` | non |
 | `GATEWAY_KEY_CACHE_TTL` | durée de cache des clés (et des absences de clé) dans la passerelle, en secondes ; délai maximal de prise en compte d'une révocation | `300` | non |
 | `GATEWAY_NEUTRAL_SUBJECT` | objet extérieur des messages chiffrés | `Message chiffré` | non |
+| `BACKEND_SUBNET`, `GATEWAY_BACKEND_IP` | sous-réseau interne relai ↔ passerelle ↔ annuaire, et adresse fixe de la passerelle (seule autorisée à réinjecter) | `172.30.53.0/24`, `172.30.53.20` | non |
 | `KEYDIR_BIND_ADDRESS` | IP **privée** de l'hôte sur laquelle publier l'annuaire (compose) | — | **oui** |
 | `KEYDIR_PUBLISHED_PORT` | port HTTPS publié sur l'hôte | `443` | non |
 | `KEYDIR_DOMAINS` | domaines dont l'annuaire publie les clés (séparés par des espaces) | — | **oui** |
@@ -296,7 +341,9 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 
 Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`
 (répertoire `config/` monté en lecture seule), `RELAY_APP_SECRETS_DIR=/run/secrets/apps`
-(répertoire `secrets/apps/` monté en lecture seule), `RELAY_MILTER=inet:gateway:9900`.
+(répertoire `secrets/apps/` monté en lecture seule), `RELAY_MILTER=inet:gateway:9900`,
+`RELAY_PROXY_FILTER=gateway:10025`, `RELAY_REINJECT_PORT=10026` (relai),
+`GATEWAY_PROXY_LISTEN=0.0.0.0:10025`, `GATEWAY_REINJECT_PORT=10026` (passerelle).
 
 ### Secrets (`secrets/`, voir [secrets/README.md](../secrets/README.md))
 
@@ -305,6 +352,7 @@ Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/application
 | `relay_smtp_username`, `relay_smtp_password` | `secrets/relay_smtp_*` | identifiants chez le fournisseur |
 | `relay_tls_cert`, `relay_tls_key` | `secrets/relay_tls_*` | certificat et clé de `smtp-relay` (port 587) |
 | `keydir_tls_cert`, `keydir_tls_key` | `secrets/keydir_tls_*` | certificat et clé de l'annuaire (`openpgpkey.<domaine>`) |
+| `gateway_hmac_key` | `secrets/gateway_hmac_key` | clé de pseudonymisation des identifiants de message (32 caractères minimum) |
 | — | `secrets/apps/<application>` | mot de passe SMTP de chaque application (16 caractères minimum, une ligne) |
 
 Ordre de lecture d'un secret `X` : le chemin indiqué par `X_FILE`, sinon
@@ -509,7 +557,7 @@ vérifié) depuis le poste de travail.
 | `client-new` | 10.0.1.50 | application ajoutée en cours de test (IT1.10) |
 | `relay` | 10.0.1.5 (alias `smtp-relay`) / 10.0.2.5 / 10.0.3.5 | relai avec identifiants valides |
 | `relay-badcreds` | 10.0.1.6 / 10.0.2.6 / 10.0.3.6 | même image, mot de passe erroné chez le fournisseur |
-| `gateway` | 10.0.3.20:9900 | passerelle (milter) |
+| `gateway` | 10.0.3.20:9900 et :10025 | passerelle (milter, filtre avant file) |
 | `keydir` | 10.0.2.30:8443 (alias `openpgpkey.example.com`) / 10.0.3.30 | annuaire de clés (HTTPS, WKD), domaines `example.com` et `partner.test` |
 | `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
 | `workstation` | 10.0.2.50 | poste destinataire : génère ses clés avec RNP et les dépose sur l'annuaire (outil `keys`), relève les BAL en IMAPS et déchiffre avec RNP (outils `mailbox`, `pgpmime`) |
@@ -554,8 +602,13 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 | IT3.8 | annuaire arrêté, cache expiré : `451 4.7.1`, rien de livré |
 | IT3.9 | après rotation, seul le nouveau trousseau déchiffre |
 | IT3.10 | destinataire externe avec clé validée : livré chiffré ; sans clé : refusé |
-| IT3.11 | fournisseur arrêté : le message en file (`postcat`) ne contient que du chiffré ; livré après relance |
+| IT3.11 | fournisseur arrêté : le message en file (`postcat`) ne contient que du chiffré, et le fichier brut de la file aucun fragment de l'objet, du corps ni des en-têtes d'origine ; livré après relance |
 | IT3.12 | objet UTF-8 (RFC 2047), pièces jointes binaires (dont vide), message proche de la taille maximale : aller-retour exact |
+| IT3.13 | port de réinjection : fermé côté VLAN Applications, refusé (`554`) depuis une autre machine du réseau backend que la passerelle |
+| IT4.1 | notification avec `X-GitLab-*`, `X-Mailer`, `Received` interne : en-têtes extérieurs ⊆ liste blanche, aucune IP ni nom interne, `Message-ID` pseudonymisé ; ces en-têtes sont présents dans la partie déchiffrée |
+| IT4.2 | réponse dans un fil (après redémarrage de la passerelle) : `In-Reply-To` et `References` = `Message-ID` pseudonymisé du premier message ; identifiants d'origine dans la partie déchiffrée |
+| IT4.3 | aucun `Received` transmis par le relai ; seuls ceux du fournisseur, sans topologie interne |
+| IT4.4 | secret `gateway_hmac_key` absent ou trop court : la passerelle refuse de démarrer |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -573,7 +626,8 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 ## 9. Points de sécurité
 
 - **Pas d'open relay.** Relayer exige une authentification SASL ; aucun domaine local n'existe ; un inventaire vide ou invalide empêche le démarrage.
-- **Chiffrement de bout en bout** : le message est chiffré pour ses destinataires avant la mise en file ; ni la file, ni le fournisseur, ni la BAL ne voient le contenu ou l'objet réel. Destinataire sans clé validée : refus, jamais d'envoi en clair.
+- **Chiffrement de bout en bout** : le message est chiffré pour ses destinataires avant la mise en file (filtre avant file, rien n'est écrit en clair) ; ni la file, ni le fournisseur, ni la BAL ne voient le contenu ou l'objet réel. Destinataire sans clé validée : refus, jamais d'envoi en clair.
+- **Métadonnées minimales** : en-têtes extérieurs en liste blanche, identifiants de message pseudonymisés, aucun `Received` interne.
 - **Trois verrous par application** : son mot de passe, ses IP (liste blanche globale dès la connexion, puis liaison login ↔ IP dans la passerelle) et son adresse (enveloppe dans Postfix, `From:` dans la passerelle). Un identifiant volé ne sert ni depuis une autre machine, ni pour usurper une autre application.
 - **Aucun mot de passe en clair** : STARTTLS obligatoire avant AUTH, TLS ≥ 1.2. Essais limités par IP (`RELAY_AUTH_RATE_LIMIT`).
 - **L'IP source doit être la vraie.** Le filtrage repose sur l'IP vue par Postfix.
@@ -583,7 +637,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 - **Annuaire.** Aucune clé publiée sans validation humaine de l'empreinte ; dépôts limités en taille et contrôlés (algorithmes, expiration, identité) ; HTTPS uniquement ; service non privilégié.
 - **Secrets.** Fichiers montés en lecture seule, jamais dans l'image ni dans `docker inspect` ; `.env` et `secrets/*` sont ignorés par git ; dans le conteneur, base SASL `0640 root:postfix`, identifiants et clé TLS `0600 root`, sur tmpfs.
 - **TLS vers le fournisseur.** `secure` vérifie la chaîne et le nom de l'hôte ; TLS 1.0 et 1.1 interdits, suites `high` uniquement.
-- **Durcissement des conteneurs** : système de fichiers racine en lecture seule, capacités minimales (aucune pour la passerelle), `no-new-privileges`, limites de ressources, bannière sans version, `VRFY` désactivé.
+- **Durcissement des conteneurs** : système de fichiers racine en lecture seule, capacités minimales (passerelle et annuaire : abandon de root et de toute capacité après la lecture des secrets), `no-new-privileges`, limites de ressources, bannière sans version, `VRFY` désactivé.
 - **Côté fournisseur** : domaine vérifié, SPF, DKIM et DMARC publiés, quotas et alertes de réputation surveillés.
 
 ## 10. Dépannage
@@ -599,6 +653,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 | `550 5.7.1 From: header must be …` | L'en-tête `From:` diffère de l'adresse de l'inventaire. |
 | `550 5.7.1 This login is not allowed from this host` | Le login est utilisé depuis l'IP d'une autre application. |
 | `454 4.3.0 Try again later` | Passerelle arrêtée ou injoignable : `docker compose ps gateway`, `docker compose logs gateway`. |
+| `451 4.3.0 Reinjection failed` | La passerelle ne peut pas réinjecter dans le relai : logs du relai (`postfix/reinject`) ; adresse de la passerelle différente de celle vue au démarrage du relai (healthcheck `gateway IP changed`) : `docker compose restart relay`. |
 | `550 5.7.1 No valid OpenPGP key for <adresse>` | Le destinataire n'a pas de clé validée dans l'annuaire (ou elle est expirée, révoquée) : `docker compose exec keydir keydir-admin show <adresse>` ; le motif exact est dans les logs de la passerelle (`reason=`). |
 | `451 4.7.1 Key directory unavailable` | La passerelle ne joint pas l'annuaire (arrêté, certificat non reconnu : `GATEWAY_KEYDIR_CA_FILE`). |
 | Le destinataire ne peut pas déchiffrer dans Thunderbird | Sa clé privée ne correspond pas à la clé validée (rotation non faite côté annuaire) : comparer les empreintes. |

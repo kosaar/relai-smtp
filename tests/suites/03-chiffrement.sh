@@ -9,15 +9,6 @@ suite "03 — passerelle de chiffrement OpenPGP"
 
 NEUTRAL="Message chiffré"
 TTL_WAIT=7   # cache des clés de la passerelle en test : 5 s
-ws() { dc exec -T workstation "$@"; }
-
-# send_eml <client> <login> <fichier .eml du client> <destinataires> [options swaks…]
-send_eml() {
-    local c=$1 login=$2 file=$3 to=$4; shift 4
-    smtp "$c" --server smtp-relay --port 587 --tls --tls-verify --tls-ca-path /pki/ca.crt \
-        --auth PLAIN --auth-user "$login" --auth-password "$(app_password "$login")" \
-        --from "${login}@example.com" --to "$to" --data "@${file}" --suppress-data "$@"
-}
 # mkmsg_in <client> <id> <options mkmsg…> : /tmp/<id>.eml et /tmp/<id>.json dans le client,
 # copie du manifeste dans $WORK/<id>.json
 mkmsg_in() {
@@ -33,7 +24,6 @@ received() {
 }
 # roundtrip <id du résumé> [id du manifeste] : compare reçu et envoyé
 roundtrip() { python3 tests/tools/compare-roundtrip.py "$WORK/$1.summary.json" "$WORK/${2:-$1}.json" "$NEUTRAL"; }
-qid_of() { { grep -oE 'queued as [0-9A-F]+' <<<"$1" || true; } | awk '{print $3}' | tail -1; }
 in_queue_for() { dc exec -T relay postqueue -j 2>/dev/null | grep -q "\"address\": *\"$1\""; }
 
 # --- IT3.1 : E2E GitLab -> alice, chiffré, déchiffré par RNP à l'identique ----------
@@ -217,7 +207,8 @@ out=$(submit client-glpi glpi "it310b-${TOKEN}" --to nobody@partner.test) && rc=
 # --- IT3.11 : fournisseur arrêté : la file ne contient que du chiffré -----------------
 id=it311-${TOKEN}
 dc stop provider >/dev/null 2>&1
-out=$(submit client-youtrack youtrack "$id" --body "Contenu secret ${id}-corps") && rc=0 || rc=$?
+out=$(submit client-youtrack youtrack "$id" --body "Contenu secret ${id}-corps" \
+    --add-header "X-YouTrack-Issue: ${id}-entete") && rc=0 || rc=$?
 qid=$(qid_of "$out")
 q=$( [[ -n $qid ]] && dc exec -T relay postcat -q "$qid" 2>&1 || true)
 if (( rc == 0 )) && [[ -n $qid && $q == *"-----BEGIN PGP MESSAGE-----"* && $q != *"$id"* ]] \
@@ -225,6 +216,13 @@ if (( rc == 0 )) && [[ -n $qid && $q == *"-----BEGIN PGP MESSAGE-----"* && $q !=
     pass "IT3.11a fournisseur arrêté, message ${qid} en file : postcat ne montre que du PGP/MIME (ni objet ni corps)"
 else
     fail "IT3.11a contenu en clair dans la file ou message absent (rc=$rc, qid=${qid:-?})" "$(grep -m3 -E 'Subject|secret' <<<"$q")"
+fi
+# Fichier brut de la file (enregistrements supprimés compris) : aucun fragment.
+raw_hits=$( [[ -n $qid ]] && queue_file_raw relay "$qid" | grep -a -c -E "${id}|Contenu secret|X-YouTrack" || true)
+if [[ -n $qid && ${raw_hits:-0} == 0 ]] && queue_file_raw relay "$qid" | grep -a -q 'BEGIN PGP MESSAGE'; then
+    pass "IT3.11c fichier brut de la file (octet par octet) : aucun fragment de l'objet, du corps ni des en-têtes d'origine"
+else
+    fail "IT3.11c fragments en clair dans le fichier brut de la file (${raw_hits:-?} ligne(s), qid=${qid:-?})"
 fi
 dc start provider >/dev/null 2>&1
 wait_healthy provider 90 || fail "IT3.11 fournisseur non sain après redémarrage"
@@ -246,4 +244,21 @@ if (( rc == 0 )) && received alice@example.com "$id" "$id" && res=$(roundtrip "$
     pass "IT3.12 objet UTF-8 (RFC 2047), pièces jointes binaires, ${size} octets (limite 5242880) : ${res}"
 else
     fail "IT3.12 aller-retour inexact (${size} octets, swaks rc=$rc)" "${res:-$(grep -E '^<' <<<"$out" | tail -3)}"
+fi
+
+# --- IT3.13 : le port de réinjection n'accepte que la passerelle -------------------
+# (sinon une application pourrait contourner le chiffrement)
+out=$(smtp client-gitlab --server 10.0.1.5 --port 10026 --quit-after CONNECT) && rc=0 || rc=$?
+reinject_probe='import smtplib, sys
+try:
+    smtplib.SMTP(sys.argv[1], 10026, timeout=10).quit(); print("accepted")
+except smtplib.SMTPConnectError as e:
+    print(e.smtp_code)
+except OSError as e:
+    print(type(e).__name__)'
+kd=$(dc exec -T keydir python3 -c "$reinject_probe" 10.0.3.5 2>&1 || true)
+if (( rc != 0 )) && ! grep -q '^<-  220' <<<"$out" && [[ $kd == 554 ]]; then
+    pass "IT3.13 port de réinjection : fermé côté VLAN Applications, 554 depuis une autre machine du réseau backend (annuaire)"
+else
+    fail "IT3.13 port de réinjection joignable sans être la passerelle (application rc=${rc}, annuaire : ${kd})" "$(tail -2 <<<"$out")"
 fi

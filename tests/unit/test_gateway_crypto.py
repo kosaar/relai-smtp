@@ -23,6 +23,7 @@ HEADERS = [
     ("Content-Transfer-Encoding", b" 7bit"),
     ("X-GitLab-Project", b" infra"),
 ]
+KEY = b"cle-hmac-de-test-0123456789abcdef"
 BODY = b"--XYZ\r\nContent-Type: text/plain\r\n\r\nbonjour\r\n--XYZ--\r\n"
 
 
@@ -33,7 +34,11 @@ class PgpMimeTest(unittest.TestCase):
         self.assertEqual(msg.get_content_type(), "multipart/mixed")
         self.assertEqual(msg.get_param("protected-headers"), "v1")
         self.assertEqual(msg["Subject"], "=?utf-8?q?R=C3=A9sultat?=\r\n\t du pipeline")
-        self.assertIsNone(msg["X-GitLab-Project"])          # lot 3 : en-têtes protégés seulement
+        # Tous les en-têtes d'origine sont dans la partie chiffrée (D9).
+        self.assertEqual(msg["X-GitLab-Project"], "infra")
+        self.assertEqual(msg["Received"], "from gitlab by relay")
+        self.assertEqual(msg["Message-ID"], "<1@gitlab>")
+        self.assertIsNone(msg["Content-Transfer-Encoding"])   # décrit l'entité d'origine
         (part,) = msg.get_payload()
         self.assertEqual(part.get_content_type(), "multipart/mixed")
         self.assertEqual(part.get_boundary(), "XYZ")
@@ -48,17 +53,61 @@ class PgpMimeTest(unittest.TestCase):
         self.assertIn(b"--B1\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nligne1\r\nligne2\r\n\r\n--B1--\r\n", inner)
         self.assertIn(b"Subject: x\r\n", inner)
 
-    def test_outer_changes(self):
-        ops = pgpmime.outer_header_changes(HEADERS + [("Subject", b" doublon")], "Message chiffré", "OB")
-        self.assertIn(("change", "Subject", 1, " =?utf-8?q?Message_chiffr=C3=A9?="), ops)
-        self.assertIn(("change", "Subject", 2, None), ops)
-        self.assertIn(("change", "Content-Type", 1,
-                       ' multipart/encrypted; protocol="application/pgp-encrypted"; boundary="OB"'), ops)
-        self.assertIn(("change", "Content-Transfer-Encoding", 1, None), ops)
-        self.assertIn(("change", "MIME-Version", 1, " 1.0"), ops)
-        self.assertFalse([o for o in ops if o[1] in ("From", "To", "Received")])
-        ops = pgpmime.outer_header_changes([("From", b" a@b.c")], "Chiffré", "OB")
-        self.assertEqual({o[1] for o in ops if o[0] == "add"}, {"MIME-Version", "Subject", "Content-Type"})
+    def outer(self, headers):
+        raw = pgpmime.build_outer_headers(headers, "Message chiffré", "OB", KEY, "example.com")
+        self.assertTrue(raw.endswith(b"\r\n"))
+        return email.message_from_bytes(raw + b"\r\n", policy=email.policy.compat32), raw
+
+    def test_outer_allowlist(self):
+        msg, raw = self.outer(HEADERS + [("Subject", b" doublon"), ("X-Mailer", b" a"), ("Cc", b" b@example.com"),
+                                         ("Auto-Submitted", b" auto-generated"), ("References", b" <0@gitlab> <1@gitlab>")])
+        self.assertEqual([k.lower() for k in msg.keys()],
+                         ["from", "to", "subject", "message-id", "mime-version", "content-type", "cc",
+                          "auto-submitted", "references"])
+        self.assertEqual(msg["Subject"], "=?utf-8?q?Message_chiffr=C3=A9?=")
+        self.assertEqual(msg["Content-Type"], 'multipart/encrypted; protocol="application/pgp-encrypted"; boundary="OB"')
+        self.assertEqual(msg["From"], "GitLab <gitlab@example.com>")
+        mid = pgpmime.pseudonymize_ids(b"<1@gitlab>", KEY, "example.com")
+        self.assertEqual(msg["Message-ID"], mid)
+        self.assertEqual(msg["References"].split()[1], mid)
+        for leak in (b"gitlab>", b"Received", b"X-GitLab", b"X-Mailer", b"Content-Transfer-Encoding", b"doublon"):
+            self.assertNotIn(leak, raw)
+
+    def test_outer_missing_and_invalid(self):
+        msg, _ = self.outer([("From", b" a@example.com")])
+        self.assertEqual(msg["MIME-Version"], "1.0")
+        self.assertRegex(msg["Message-ID"], r"^<[0-9a-f]{32}@example\.com>$")
+        msg, raw = self.outer([("Message-ID", b" sans-chevrons"), ("References", b" rien")])
+        self.assertNotIn(b"References", raw)
+        self.assertNotIn(b"sans-chevrons", raw)
+        self.assertRegex(msg["Message-ID"], r"^<[0-9a-f]{32}@example\.com>$")
+
+    def test_parse_message(self):
+        h, b = pgpmime.parse_message(b"From: a@b\nSubject: x\n\ty\nX-A:1\n\nligne\n.point\n")
+        self.assertEqual(h, [("From", b" a@b"), ("Subject", b" x\r\n\ty"), ("X-A", b"1")])
+        self.assertEqual(b, b"ligne\r\n.point\r\n")
+        h, b = pgpmime.parse_message(b"From: a@b\r\npas un en-tete\r\nsuite\r\n")
+        self.assertEqual(h, [("From", b" a@b")])
+        self.assertEqual(b, b"pas un en-tete\r\nsuite\r\n")
+        self.assertEqual(pgpmime.parse_message(b"From: a@b\r\n"), ([("From", b" a@b")], b""))
+
+    def test_pseudonymize_ids(self):
+        p = pgpmime.pseudonymize_ids
+        a = p(b" <issue_42@gitlab.internal.lan>", KEY, "example.com")
+        self.assertRegex(a, r"^<[0-9a-f]{32}@example\.com>$")
+        self.assertNotIn("gitlab", a)
+        # Déterministe (fil conservé), plié ou non ; dépend de la clé.
+        self.assertEqual(a, p(b"\r\n\t<issue_42@gitlab.internal.lan>", KEY, "example.com"))
+        self.assertEqual(a, p(b" <issue_42@gitlab.\r\n internal.lan>", KEY, "example.com"))
+        self.assertNotEqual(a, p(b" <issue_42@gitlab.internal.lan>", b"k" * 32, "example.com"))
+        refs = p(b" <r1@h>\r\n <r2@h> <issue_42@gitlab.internal.lan>", KEY, "example.com").split(" ")
+        self.assertEqual(refs[2], a)
+        self.assertEqual(len(refs), 3)
+        many = p(b" ".join(b"<id%d@h>" % i for i in range(30)), KEY, "example.com").split(" ")
+        self.assertEqual(len(many), pgpmime.MAX_REFERENCES)
+        self.assertEqual(many[0], p(b"<id0@h>", KEY, "example.com"))
+        self.assertEqual(many[-1], p(b"<id29@h>", KEY, "example.com"))
+        self.assertEqual(p(b" pas d'identifiant", KEY, "example.com"), "")
 
     def test_encrypted_body(self):
         body = pgpmime.build_encrypted_body(b"-----BEGIN PGP MESSAGE-----\n\nabc\n-----END PGP MESSAGE-----\n", "OB")

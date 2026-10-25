@@ -6,6 +6,7 @@
 #   - secrets/relay_smtp_*       identifiants chez le fournisseur ;
 #   - secrets/relay_tls_*        certificat et clé de smtp-relay (soumission 587) ;
 #   - secrets/keydir_tls_*       certificat et clé de l'annuaire (openpgpkey.<domaine>) ;
+#   - secrets/gateway_hmac_key   clé de pseudonymisation des identifiants de message ;
 #   - .env                       paramètres (copie de .env.example).
 #  Usage : docker compose up -d --build
 # =============================================================================
@@ -40,8 +41,12 @@ services:
       RELAY_AUTH_RATE_LIMIT: ${RELAY_AUTH_RATE_LIMIT:-30}
       MESSAGE_SIZE_LIMIT: ${MESSAGE_SIZE_LIMIT:-10240000}
       RELAY_HOSTNAME: ${RELAY_HOSTNAME:-}
-      # --- Passerelle (milter, réseau backend)
+      # --- Passerelle (réseau backend) : milter (identité, clés) et filtre avant
+      #     file (chiffrement) ; les messages chiffrés reviennent sur le port de
+      #     réinjection, ouvert à la seule IP de la passerelle.
       RELAY_MILTER: inet:gateway:9900
+      RELAY_PROXY_FILTER: gateway:10025
+      RELAY_REINJECT_PORT: "10026"
       # --- Fournisseur cloud
       RELAY_HOST: ${RELAY_HOST:-}
       RELAY_PORT: ${RELAY_PORT:-587}
@@ -114,13 +119,23 @@ services:
       GATEWAY_KEYDIR_CA_FILE: ${GATEWAY_KEYDIR_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
       GATEWAY_KEY_CACHE_TTL: ${GATEWAY_KEY_CACHE_TTL:-300}
       GATEWAY_NEUTRAL_SUBJECT: ${GATEWAY_NEUTRAL_SUBJECT:-Message chiffré}
+      GATEWAY_PROXY_LISTEN: 0.0.0.0:10025
+      GATEWAY_REINJECT_PORT: "10026"
       TZ: ${TZ:-UTC}
+    secrets:
+      - gateway_hmac_key
     volumes:
       - ./config:/etc/relay:ro
     networks:
-      - backend
+      backend:
+        # Adresse fixe : le port de réinjection du relai n'accepte qu'elle.
+        ipv4_address: ${GATEWAY_BACKEND_IP:-172.30.53.20}
+    # Démarre en root (copie du secret) puis s'exécute sous l'utilisateur
+    # gateway, sans capacité.
     tmpfs:
+      - /run:mode=0755,size=4m
       - /tmp:mode=1777,size=16m
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
     deploy:
       resources:
         limits:
@@ -191,6 +206,9 @@ networks:
   backend:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: ${BACKEND_SUBNET:-172.30.53.0/24}
 
 volumes:
   relay-queue:
@@ -209,3 +227,5 @@ secrets:
     file: ./secrets/keydir_tls_cert
   keydir_tls_key:
     file: ./secrets/keydir_tls_key
+  gateway_hmac_key:
+    file: ./secrets/gateway_hmac_key

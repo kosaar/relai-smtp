@@ -54,6 +54,28 @@ submit() {
         --header "Subject: ${subj}" --body "Test ${subj}" "$@"
 }
 
+# send_eml <client> <login> <fichier .eml du client> <destinataires> [options swaks…]
+send_eml() {
+    local c=$1 login=$2 file=$3 to=$4; shift 4
+    smtp "$c" --server smtp-relay --port 587 --tls --tls-verify --tls-ca-path /pki/ca.crt \
+        --auth PLAIN --auth-user "$login" --auth-password "$(app_password "$login")" \
+        --from "${login}@example.com" --to "$to" --data "@${file}" --suppress-data "$@"
+}
+# put_file <service> <chemin> : écrit stdin dans un fichier du conteneur.
+# shellcheck disable=SC2016  # $1 est développé par le sh du conteneur
+put_file() { dc exec -T "$1" sh -c 'cat >"$1"' _ "$2"; }
+# qid_of <sortie swaks> : identifiant de file de la réponse « queued as ».
+qid_of() { { grep -oE 'queued as [0-9A-F]+' <<<"$1" || true; } | awk '{print $3}' | tail -1; }
+# queue_file_raw <relai> <qid> : octets bruts du fichier de file (pas postcat).
+queue_file_raw() {
+    # shellcheck disable=SC2016  # développé par le sh du conteneur
+    dc exec -T "$1" sh -c 'cd /var/spool/postfix && f=$(find incoming active deferred hold -type f -name "$1" | head -1)
+        [ -n "$f" ] && cat "$f"' _ "$2"
+}
+
+# ws <commande…> : commande sur le poste de travail.
+ws() { dc exec -T workstation "$@"; }
+
 # --- Clés des destinataires ---------------------------------------------------------
 # provision_key <adresse> : le poste génère sa paire de clés (RNP), la dépose sur
 # l'annuaire en HTTPS, puis l'administrateur la valide (empreinte du poste).

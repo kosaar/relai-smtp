@@ -27,12 +27,15 @@ COPY common/pgpkeys/ /opt/relay/lib/pgpkeys/
 COPY gateway/relaygw/ /opt/relay/lib/relaygw/
 COPY --chmod=0755 gateway/bin/relay-gateway /usr/local/bin/relay-gateway
 COPY --chmod=0755 gateway/bin/gateway-healthcheck /usr/local/bin/gateway-healthcheck
+COPY --chmod=0755 gateway/entrypoint.sh /usr/local/bin/gateway-entrypoint
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PGP_TMPDIR=/tmp
-USER gateway
-EXPOSE 9900
+# Démarre en root (lecture du secret), puis s'exécute sous l'utilisateur
+# gateway (cf. entrypoint.sh).
+EXPOSE 9900 10025
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/gateway-healthcheck"]
 
-ENTRYPOINT ["/usr/local/bin/relay-gateway"]
+ENTRYPOINT ["/usr/local/bin/gateway-entrypoint"]
+CMD ["/usr/local/bin/relay-gateway"]

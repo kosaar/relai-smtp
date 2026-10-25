@@ -10,7 +10,6 @@
 # =============================================================================
 suite "02 — annuaire de clés publiques (keydir)"
 
-ws()    { dc exec -T workstation "$@"; }
 admin() { dc exec -T keydir keydir-admin "$@"; }
 # deposit <adresse> <commande produisant la clé> : sortie de « keys deposit »
 deposit() { local email=$1; shift; ws bash -c "$* | keys deposit ${email}"; }

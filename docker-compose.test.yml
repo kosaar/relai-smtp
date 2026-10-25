@@ -259,3 +259,5 @@ secrets:
     file: ./tests/.work/secrets/relay_smtp_password_bad
   mailbox_password:
     file: ./tests/.work/secrets/mailbox_password
+  gateway_hmac_key:
+    file: ./tests/.work/secrets/gateway_hmac_key

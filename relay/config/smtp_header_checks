@@ -1,0 +1,8 @@
+# =============================================================================
+#  smtp_header_checks — appliqué par le client smtp, en sortie vers le smarthost.
+#  Copié tel quel dans /etc/postfix au démarrage (entrypoint.sh).
+#  Le Received ajouté par le relai (nom et IP de l'application, topologie
+#  interne) est retiré ; la passerelle a déjà déplacé les Received d'origine
+#  dans la partie chiffrée.
+# =============================================================================
+/^Received:/    IGNORE
