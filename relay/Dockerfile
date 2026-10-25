@@ -51,7 +51,7 @@ COPY common/relaycfg/ /opt/relay/lib/relaycfg/
 COPY --chmod=0755 common/bin/relay-config /usr/local/bin/relay-config
 # Processus principal (Postfix + copie des journaux) et exporteur de métriques.
 COPY relay/exporter/relayexp/ /opt/relay/lib/relayexp/
-COPY --chmod=0755 relay/bin/relay-run relay/bin/relay-exporter /usr/local/bin/
+COPY --chmod=0755 relay/bin/relay-run relay/bin/relay-exporter relay/bin/relay-smoke-test /usr/local/bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 

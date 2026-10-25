@@ -58,6 +58,9 @@ services:
       #     l'annuaire (clés) sont lues sur son port interne et recopiées.
       RELAY_METRICS_PROBE_INTERVAL: ${RELAY_METRICS_PROBE_INTERVAL:-300}
       RELAY_KEYDIR_METRICS_URL: http://keydir:9155/metrics
+      # --- Test après déploiement : docker compose exec relay relay-smoke-test
+      #     (application locale « supervision » de l'inventaire -> cette BAL).
+      RELAY_SMOKE_TO: ${RELAY_SMOKE_TO:-}
       TZ: ${TZ:-UTC}
     secrets:
       - relay_smtp_username

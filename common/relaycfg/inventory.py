@@ -15,6 +15,11 @@ Format :
 
 Le nom de la table (« gitlab ») est le login SASL de l'application ; son mot
 de passe est le fichier <répertoire des secrets>/<nom>.
+
+Application locale : client_ips = ["127.0.0.1"] (ou ["::1"]), seule IP de
+l'application, la réserve aux processus du conteneur du relai lui-même
+(message de contrôle de relay-smoke-test). Aucune autre adresse de bouclage
+n'est acceptée.
 Toutes les erreurs sont collectées puis signalées ensemble (InventoryError).
 """
 from __future__ import annotations
@@ -28,6 +33,7 @@ from pathlib import Path
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 LOCAL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?$")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+LOCAL_IPS = ("127.0.0.1", "::1")   # bouclage : application locale au conteneur du relai
 MIN_PASSWORD_LEN = 16
 QUOTA_MAX = 100_000
 DEFAULT_QUOTA = 200
@@ -87,8 +93,11 @@ def _ip(value, where: str, errors: list[str]) -> str | None:
     except ValueError:
         errors.append(f"{where} : '{value}' n'est pas une adresse IPv4 ou IPv6.")
         return None
+    if ip.compressed in LOCAL_IPS:
+        return ip.compressed
     if ip.is_unspecified or ip.is_loopback or ip.is_multicast:
-        errors.append(f"{where} : '{value}' refusée (adresse non spécifiée, de bouclage ou multicast).")
+        errors.append(f"{where} : '{value}' refusée (adresse non spécifiée, de bouclage ou multicast ; "
+                      f"seules {' et '.join(LOCAL_IPS)} sont admises, pour une application locale).")
         return None
     return ip.compressed
 
@@ -160,6 +169,9 @@ def parse(data: dict, source: str = "inventaire") -> Inventory:
                 ip = _ip(raw, where, errors)
                 if ip and ip not in ips:
                     ips.append(ip)
+            if len(ips) > 1 and any(ip in LOCAL_IPS for ip in ips):
+                errors.append(f"{where} : une adresse de bouclage ({', '.join(LOCAL_IPS)}) doit être la seule IP "
+                              "de l'application (application locale au conteneur du relai).")
 
         quota = default_quota
         if "quota_per_hour" in entry:

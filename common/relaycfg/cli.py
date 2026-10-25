@@ -74,7 +74,8 @@ def cmd_postfix(a) -> int:
     with (out / "mynetworks").open("w") as f:
         f.write("127.0.0.1/32\n")
         for ip in inv.client_ips():
-            f.write(f"{ip}/32\n" if ipaddress.ip_address(ip).version == 4 else f"[{ip}]/128\n")
+            if ip != "127.0.0.1":
+                f.write(f"{ip}/32\n" if ipaddress.ip_address(ip).version == 4 else f"[{ip}]/128\n")
 
     # Base reconstruite entièrement à chaque démarrage : une application retirée
     # de l'inventaire perd immédiatement son accès.

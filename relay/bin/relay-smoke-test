@@ -1,0 +1,10 @@
+#!/usr/bin/python3
+# Test de bon fonctionnement après déploiement (dans le conteneur du relai) :
+#   docker compose exec relay relay-smoke-test --to supervision@example.com
+# Voir relayexp/smoke.py.
+import sys
+
+sys.path.insert(0, "/opt/relay/lib")
+from relayexp.smoke import main  # noqa: E402
+
+sys.exit(main())

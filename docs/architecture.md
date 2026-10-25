@@ -1,10 +1,70 @@
 # Architecture du relai SMTP
 
-> État actuel : lots 1 à 4, 6 et 7 du [plan d'implémentation](plan-implementation.md)
-> (soumission 587 authentifiée, identité par application, annuaire de clés,
-> chiffrement OpenPGP dans la passerelle avant la mise en file, nettoyage des
-> en-têtes, contrôle du contenu, supervision). Les quotas (lot 5) ne sont pas
-> réalisés ; le lot 8 finalise l'exploitation et la documentation.
+> État : lots 0 à 4 et 6 à 8 du [plan d'implémentation](plan-implementation.md)
+> réalisés (soumission 587 authentifiée, identité par application, annuaire de
+> clés, chiffrement OpenPGP dans la passerelle avant la mise en file, nettoyage
+> des en-têtes, contrôle du contenu, supervision, test après déploiement). Les
+> quotas par application (lot 5) ne sont pas réalisés. Mise en production :
+> [deploiement-production.md](deploiement-production.md).
+
+## Zones et flux du PRD (F1 à F10)
+
+```mermaid
+flowchart LR
+    subgraph Z1["① VLAN Applications"]
+        APPS["GitLab · Jenkins<br/>GLPI · YouTrack"]
+    end
+    subgraph Z2["② VLAN Services"]
+        RELAY["Relai : relay + gateway<br/>587 (seul port SMTP)<br/>métriques :9154"]
+        KD["Annuaire keydir<br/>HTTPS 443"]
+        RELAY -. "réseau Docker interne<br/>(WKD, métriques des clés)" .- KD
+    end
+    subgraph Z3["③ VLAN Administration"]
+        BAS["Bastion SSH<br/>(VPN télétravail)"]
+        SUP["Supervision (Prometheus)<br/>collecteur de journaux"]
+        VAULT["Coffre-fort<br/>GitLab CI (dépôt de configuration)"]
+    end
+    subgraph Z4["④ Postes de travail (site et VPN)"]
+        TB["Thunderbird<br/>clé privée locale"]
+    end
+    subgraph Z5["⑤ Internet"]
+        SH["Smarthost du fournisseur<br/>(DKIM)"]
+        BAL[("BAL chez le fournisseur")]
+        DNSP["DNS public<br/>SPF · DKIM · DMARC"]
+    end
+    DNS["Résolveur DNS interne"]
+    FW{{"Pare-feu périmétrique"}}
+
+    APPS -- "F1 · 587 STARTTLS + AUTH" --> RELAY
+    RELAY == "F2 · 587/465 TLS vérifié + SASL" ==> FW ==> SH --> BAL
+    RELAY -- "F3 · 53" --> DNS
+    SUP -- "F4 · 9154 /metrics" --> RELAY
+    RELAY -- "F5 · syslog TLS" --> SUP
+    BAS -- "F6 · 22 SSH par clé" --> RELAY
+    APPS -- "F7 · 25/465/587 vers Internet" --x FW
+    FW -- "F8 · 25 vers le relai" --x RELAY
+    TB -- "F9 · 993 IMAPS / 995 POP3S" --> BAL
+    TB -- "F10 · 443 HTTPS (dépôt de clé)" --> KD
+```
+
+| Flux | Source → destination | Port | Décision | Mise en œuvre | Vérification |
+|------|----------------------|------|----------|---------------|--------------|
+| F1 | VLAN Applications → relai | 587/tcp, STARTTLS + AUTH | autorisé | port publié sur `RELAY_BIND_ADDRESS` seulement ; TLS ≥ 1.2 obligatoire avant AUTH ; un login par application ; IP, login et adresse liés (Postfix + passerelle) | IT1.1 à IT1.10 |
+| F2 | relai → smarthost | 587/tcp STARTTLS ou 465/tcp TLS | autorisé | `smtp_tls_security_level = secure` (chaîne et nom vérifiés), TLS ≥ 1.2, SASL ; message déjà chiffré | T5, T6, IT3.11, IT7.3 |
+| F3 | relai → résolveur DNS interne | 53 | autorisé | résolveur de l'hôte (DNS intégré de Docker) | — |
+| F4 | supervision → relai | 9154/tcp (`RELAY_METRICS_BIND_ADDRESS`) | autorisé | exporteur Prometheus, métadonnées seulement | IT7.1 à IT7.4 |
+| F5 | relai → collecteur de journaux | syslog TLS | autorisé | journaux sur stdout, sans contenu ; export par le pilote de logs Docker ou un agent de l'hôte | IT7.5 |
+| F6 | bastion → relai | 22/tcp, SSH par clé | autorisé | `sshd` de l'hôte (hors dépôt) | — |
+| F7 | VLAN Applications → Internet | 25, 465, 587/tcp | **refusé et journalisé** | pare-feu périmétrique (hors dépôt) | recette R4 |
+| F8 | toute source → relai | 25/tcp | **refusé** | aucun service sur le port 25 ; aucun port entrant depuis Internet | IT1.7 |
+| F9 | postes → BAL du fournisseur | 993/tcp IMAPS ou 995/tcp POP3S | autorisé | Thunderbird ; seule sa clé privée déchiffre | IT3.1 (relève IMAPS vérifiée) |
+| F10 | postes (site ou VPN) → annuaire | 443/tcp HTTPS | autorisé | `keydir` publié sur `KEYDIR_BIND_ADDRESS`, TLS ≥ 1.2, aucun port en clair ; clé publiée après validation de l'empreinte | IT2.1 à IT2.7 |
+
+Flux internes à l'hôte du relai (réseau Docker `backend`, `internal`, non
+routé) : relai ↔ passerelle (milter 9900, filtre avant file 10025,
+réinjection 10026), passerelle → annuaire (WKD en HTTPS), exporteur →
+annuaire (métriques 9155). Les règles de pare-feu à poser sont détaillées dans
+le [guide de mise en production](deploiement-production.md#3-pare-feu).
 
 ## Vue d'ensemble
 
@@ -187,3 +247,8 @@ flowchart LR
 - **L'exporteur ne bloque jamais le courrier** : `relay-run` lui donne une
   copie non bloquante des journaux (lignes perdues pour les métriques seulement
   en cas de retard) et le relance s'il s'arrête.
+- **Test après déploiement** : `relay-smoke-test` (dans le conteneur du relai)
+  soumet un message de contrôle de l'application locale `supervision`
+  (`client_ips = ["127.0.0.1"]`) vers la BAL de supervision par le chemin réel,
+  puis lit son résultat de livraison auprès de l'exporteur
+  (`GET /delivery?qid=…`) : code 0 seulement si le smarthost l'a accepté.

@@ -1,29 +1,57 @@
 # =============================================================================
-#  CI GitLab du relai SMTP.
+#  CI/CD GitLab du relai SMTP (chaîne « tout est code » du PRD).
 #   lint        : shellcheck, compilation Python, tests unitaires (tests/ci/lint.sh)
-#                 + validation de l'inventaire des applications (relay-config check)
+#   config      : inventaire des applications (relay-config check) et règles
+#                 de contenu, validés à chaque merge request
 #   integration : construction des images + tests d'intégration et de bout en
 #                 bout (tests/run-tests.sh : vrais Postfix, Dovecot, GnuPG, RNP)
-#   release     : images du relai, de la passerelle et de l'annuaire poussées dans le registre (tags git)
+#   release     : images du relai, de la passerelle et de l'annuaire poussées
+#                 dans le registre (tags git)
+#   deploy      : déploiement idempotent sur l'hôte du relai (tag, manuel), puis
+#                 relay-smoke-test (message de contrôle accepté par le smarthost)
+#   smoke-test  : relay-smoke-test seul, à la demande ou planifié (pipeline
+#                 programmé « Build → Pipeline schedules »)
 #
-#  Prérequis du runner pour « integration » et « release » : exécuteur Docker
-#  avec service docker:dind en mode privilégié. La stack de test monte des
-#  fichiers du dépôt (secrets générés dans tests/.work) : le répertoire de build
-#  doit être visible du démon Docker au même chemin (comportement par défaut
-#  du service dind partageant /builds ; sinon, exécuteur « shell » avec Docker).
+#  Prérequis des runners :
+#   - « integration » et « release » : exécuteur Docker avec service
+#     docker:dind en mode privilégié. La stack de test monte des fichiers du
+#     dépôt (secrets générés dans tests/.work) : le répertoire de build doit être
+#     visible du démon Docker au même chemin (comportement par défaut du service
+#     dind partageant /builds ; sinon, exécuteur « shell » avec Docker).
+#   - « deploy » et « smoke-test » : runner « shell » installé sur l'hôte du
+#     relai, étiqueté smtp-relay-production, membre du groupe docker ; le
+#     clone de production (RELAY_DEPLOY_DIR, /opt/smtp-relay par défaut) porte
+#     .env (dont RELAY_SMOKE_TO, BAL de supervision dont la clé est publiée
+#     sur l'annuaire) et secrets/ (jamais dans le dépôt).
 # =============================================================================
 
-stages: [lint, integration, release]
+stages: [lint, integration, release, deploy]
 
 variables:
   UBUNTU_TAG: resolute-20260927
   DOCKER_TLS_CERTDIR: "/certs"
+  RELAY_DEPLOY_DIR: /opt/smtp-relay
 
 default:
   interruptible: true
 
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+.not-scheduled:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: never
+    - when: on_success
+
 lint:
   stage: lint
+  extends: .not-scheduled
   image: ubuntu:${UBUNTU_TAG}
   before_script:
     - apt-get update -qq
@@ -31,14 +59,19 @@ lint:
   script:
     - tests/ci/lint.sh
 
-relay-config check:
+config check:
   stage: lint
+  extends: .not-scheduled
   image: ubuntu:${UBUNTU_TAG}
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq --no-install-recommends python3 >/dev/null
   script:
     - PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
+    - |
+      PYTHONPATH=gateway python3 -c 'from relaygw import content
+      r = content.load("config/content-rules.toml")
+      print(f"règles de contenu valides : {len(r.patterns)} motif(s), {len(r.forbidden_extensions)} extension(s) interdite(s)")'
 
 .docker:
   image: docker:29
@@ -50,9 +83,9 @@ relay-config check:
     - docker info >/dev/null
 
 integration:
-  extends: .docker
+  extends: [.docker, .not-scheduled]
   stage: integration
-  timeout: 45m
+  timeout: 60m
   script:
     - tests/run-tests.sh
   artifacts:
@@ -67,9 +100,52 @@ release:
     - if: $CI_COMMIT_TAG
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker build --build-arg VERSION="$CI_COMMIT_TAG" -f relay/Dockerfile -t "$CI_REGISTRY_IMAGE/smtp-relay:$CI_COMMIT_TAG" .
-    - docker build --build-arg VERSION="$CI_COMMIT_TAG" -f gateway/Dockerfile -t "$CI_REGISTRY_IMAGE/smtp-relay-gateway:$CI_COMMIT_TAG" .
-    - docker build --build-arg VERSION="$CI_COMMIT_TAG" -f keydir/Dockerfile -t "$CI_REGISTRY_IMAGE/smtp-relay-keydir:$CI_COMMIT_TAG" .
-    - docker push "$CI_REGISTRY_IMAGE/smtp-relay:$CI_COMMIT_TAG"
-    - docker push "$CI_REGISTRY_IMAGE/smtp-relay-gateway:$CI_COMMIT_TAG"
-    - docker push "$CI_REGISTRY_IMAGE/smtp-relay-keydir:$CI_COMMIT_TAG"
+    - |
+      for c in "relay smtp-relay" "gateway smtp-relay-gateway" "keydir smtp-relay-keydir"; do
+        set -- $c
+        docker build --build-arg VERSION="$CI_COMMIT_TAG" -f "$1/Dockerfile" -t "$CI_REGISTRY_IMAGE/$2:$CI_COMMIT_TAG" .
+        docker push "$CI_REGISTRY_IMAGE/$2:$CI_COMMIT_TAG"
+      done
+
+# Déploiement : le clone de production passe sur le tag, les images sont
+# reconstruites, les conteneurs remplacés (la file reste dans son volume) ;
+# relay, gateway et keydir doivent être sains, puis le message de contrôle
+# doit être accepté par le smarthost. Rejouable sans effet de bord.
+deploy:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+  tags: [smtp-relay-production]
+  environment:
+    name: production
+  resource_group: production
+  interruptible: false
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - cd "$RELAY_DEPLOY_DIR"
+    - git fetch --force --tags origin
+    - git -c advice.detachedHead=false checkout --detach "$CI_COMMIT_TAG"
+    - RELAY_IMAGE_TAG="${CI_COMMIT_TAG#v}" docker compose build --pull
+    - RELAY_IMAGE_TAG="${CI_COMMIT_TAG#v}" docker compose up -d --wait --wait-timeout 180
+    - docker compose exec -T relay relay-smoke-test
+
+smoke-test:
+  stage: deploy
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
+  tags: [smtp-relay-production]
+  environment:
+    name: production
+    action: verify
+  resource_group: production
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - cd "$RELAY_DEPLOY_DIR"
+    - docker compose ps
+    - docker compose exec -T relay relay-smoke-test

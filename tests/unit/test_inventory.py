@@ -72,10 +72,17 @@ class ParseTest(unittest.TestCase):
 
     def test_invalid_ips(self):
         for bad, msg in (('"10.0.1.0/24"', "pas de CIDR"), ('"999.1.1.1"', "n'est pas une adresse"),
-                         ('"127.0.0.1"', "bouclage"), ('"0.0.0.0"', "non spécifiée"), ("10", "chaîne attendue")):
+                         ('"127.0.0.2"', "bouclage"), ('"0.0.0.0"', "non spécifiée"), ("10", "chaîne attendue"),
+                         ('"10.0.1.20", "127.0.0.1"', "seule IP")):
             with self.subTest(bad=bad):
                 self.assertIn(msg, errors_of(BASE.replace('["10.0.1.20"]', f"[{bad}]")))
         self.assertIn("liste non vide", errors_of(BASE.replace('["10.0.1.20"]', "[]")))
+
+    def test_local_application(self):
+        for local in ("127.0.0.1", "::1"):
+            with self.subTest(local=local):
+                app = parse(BASE.replace('["10.0.1.20"]', f'["{local}"]')).applications["jenkins"]
+                self.assertEqual(app.client_ips, (local,))
 
     def test_invalid_names_and_keys(self):
         self.assertIn("nom invalide", errors_of(BASE.replace("[applications.jenkins]", "[applications.Jenkins]")))

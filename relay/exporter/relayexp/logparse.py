@@ -11,6 +11,9 @@ identifiant de règle de contenu) : les journaux ne contiennent ni objet ni corp
   - blocages de contenu, par application et par règle ;
   - livraisons vers le smarthost (sent, deferred, bounced, expired) et
     différés par motif, par application (expéditeur d'enveloppe).
+
+Le dernier résultat de livraison des derniers messages (identifiant de file →
+statut et motif, sans adresse) est conservé pour relay-smoke-test.
 """
 from __future__ import annotations
 
@@ -76,6 +79,7 @@ DEFER_REASONS: list[tuple[str, str]] = [
 ]
 MAX_RECIPIENT_SERIES = 1000
 MAX_TRACKED_QIDS = 20000
+MAX_OUTCOMES = 5000
 UNKNOWN = "unknown"
 NO_SENDER = "none"
 
@@ -154,6 +158,7 @@ class LogParser:
         self.deferrals = registry.counter(
             "relay_deferrals_total", "Livraisons différées, par application et motif", ("app", "reason"))
         self._senders: OrderedDict[str, str] = OrderedDict()
+        self._outcomes: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._recipients: set[str] = set()
 
     # -- utilitaires ------------------------------------------------------------
@@ -162,6 +167,16 @@ class LogParser:
         self._senders.move_to_end(qid)
         while len(self._senders) > MAX_TRACKED_QIDS:
             self._senders.popitem(last=False)
+
+    def _record(self, qid: str, status: str, reason: str = "") -> None:
+        self._outcomes[qid] = (status, reason)
+        self._outcomes.move_to_end(qid)
+        while len(self._outcomes) > MAX_OUTCOMES:
+            self._outcomes.popitem(last=False)
+
+    def outcome(self, qid: str) -> tuple[str, str] | None:
+        """Dernier résultat de livraison du message (statut, motif de différé), None si inconnu."""
+        return self._outcomes.get(qid)
 
     def _app_of_qid(self, qid: str) -> str:
         sender = self._senders.get(qid)
@@ -228,6 +243,7 @@ class LogParser:
         m = EXPIRED_RE.match(msg)
         if m:
             self.deliveries.inc(app=self._app_of_qid(m["qid"]), status="expired")
+            self._record(m["qid"], "expired")
             return
         m = QMGR_FROM_RE.match(msg)
         if m:
@@ -242,6 +258,9 @@ class LogParser:
         if not m:
             return
         app = self._app_of_qid(m["qid"])
-        self.deliveries.inc(app=app, status=m["status"])
-        if m["status"] == "deferred":
-            self.deferrals.inc(app=app, reason=defer_reason(m["detail"]))
+        status = m["status"]
+        self.deliveries.inc(app=app, status=status)
+        reason = defer_reason(m["detail"]) if status == "deferred" else ""
+        if reason:
+            self.deferrals.inc(app=app, reason=reason)
+        self._record(m["qid"], status, reason)

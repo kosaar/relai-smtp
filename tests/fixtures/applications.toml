@@ -25,3 +25,9 @@ client_ips = ["10.0.1.40"]
 description = "YouTrack (test)"
 address = "youtrack@example.com"
 client_ips = ["10.0.1.45"]
+
+# Application locale au conteneur du relai (127.0.0.1) : relay-smoke-test (IT8.1).
+[applications.supervision]
+description = "Message de contrôle après déploiement (test)"
+address = "supervision@example.com"
+client_ips = ["127.0.0.1"]

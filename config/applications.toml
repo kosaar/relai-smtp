@@ -39,3 +39,12 @@ client_ips = ["10.0.1.30"]
 description = "YouTrack : suivi des demandes"
 address = "youtrack@example.com"
 client_ips = ["10.0.1.40"]
+
+# Application locale au conteneur du relai : message de contrôle de
+# relay-smoke-test après chaque déploiement (vers RELAY_SMOKE_TO). 127.0.0.1
+# doit être sa seule IP : le login n'est utilisable que depuis le relai lui-même.
+[applications.supervision]
+description = "Message de contrôle après déploiement (relay-smoke-test)"
+address = "supervision@example.com"
+client_ips = ["127.0.0.1"]
+quota_per_hour = 20

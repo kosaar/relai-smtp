@@ -46,11 +46,22 @@ def parse_postqueue_json(output: str, now: float) -> QueueStats:
     return QueueStats(True, counts, age)
 
 
-def queue_stats(timeout: float = 10) -> QueueStats:
+def postqueue_json(timeout: float = 10) -> str | None:
+    """Sortie de « postqueue -j » (un objet JSON par message), None si illisible."""
     try:
-        out = subprocess.run(["postqueue", "-j"], capture_output=True, text=True, timeout=timeout, check=True).stdout
+        return subprocess.run(["postqueue", "-j"], capture_output=True, text=True, timeout=timeout,
+                              check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def queue_stats(timeout: float = 10) -> QueueStats:
+    out = postqueue_json(timeout)
+    if out is None:
+        return QueueStats(False, {}, 0.0, "postqueue")
+    try:
         return parse_postqueue_json(out, time.time())
-    except (OSError, subprocess.SubprocessError, ValueError) as e:
+    except ValueError as e:
         return QueueStats(False, {}, 0.0, type(e).__name__)
 
 

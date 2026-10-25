@@ -10,10 +10,10 @@ viennent du coffre-fort de l'équipe, jamais d'un fichier versionné.
 | `relay_smtp_password`   | mot de passe / clé SMTP du fournisseur cloud                 |
 | `relay_tls_cert`        | certificat (et chaîne) de `smtp-relay`, présenté sur le 587  |
 | `relay_tls_key`         | clé privée correspondante                                    |
-| `keydir_tls_cert`       | certificat (et chaîne) de l'annuaire, pour `openpgpkey.<domaine>` (WKD) et le nom utilisé par les postes |
+| `keydir_tls_cert`       | certificat (et chaîne) de l'annuaire, SAN `openpgpkey.<domaine>` (WKD, postes) et `keydir` (nom interne vérifié par la passerelle) |
 | `keydir_tls_key`        | clé privée correspondante                                    |
 | `gateway_hmac_key`      | clé de pseudonymisation des identifiants de message (`Message-ID`, `References`), 32 caractères minimum ; la changer coupe les fils de discussion en cours |
-| `apps/<application>`    | mot de passe SMTP de chaque application de `config/applications.toml` (16 caractères minimum, une ligne) |
+| `apps/<application>`    | mot de passe SMTP de chaque application de `config/applications.toml` (16 caractères minimum, une ligne), y compris `supervision` (relay-smoke-test) |
 
 ```bash
 install -d -m 700 secrets/apps
@@ -28,7 +28,7 @@ install -m 600 keydir.key secrets/keydir_tls_key
 install -m 600 /dev/null secrets/gateway_hmac_key
 openssl rand -base64 48 | tr -d '\n' > secrets/gateway_hmac_key
 # Un mot de passe par application (le nom du fichier = login SMTP = nom dans l'inventaire)
-for app in gitlab jenkins glpi youtrack; do
+for app in gitlab jenkins glpi youtrack supervision; do
     install -m 600 /dev/null "secrets/apps/$app"
     openssl rand -base64 32 | tr -d '\n' > "secrets/apps/$app"
 done

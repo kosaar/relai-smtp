@@ -12,7 +12,7 @@ set -Eeuo pipefail
 die() { echo "provider: FATAL: $*" >&2; exit 1; }
 read_secret() { local f=$1; [[ -r $f ]] || die "secret $f manquant"; local v; v=$(<"$f"); printf '%s' "${v%$'\n'}"; }
 
-MAILBOXES=${PROVIDER_MAILBOXES:-alice@example.com bob@example.com carol@example.com ext@partner.test}
+MAILBOXES=${PROVIDER_MAILBOXES:-alice@example.com bob@example.com carol@example.com supervision@example.com ext@partner.test}
 for f in ca.crt provider.crt provider.key; do [[ -s /pki/$f ]] || die "/pki/$f absent (service pki non exécuté ?)"; done
 
 # --- Compte SASL du relai -------------------------------------------------------

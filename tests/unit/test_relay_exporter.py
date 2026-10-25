@@ -109,12 +109,26 @@ class LogParserTest(unittest.TestCase):
         self.assertEqual(p.deferrals.get(app="jenkins", reason="auth"), 1)
         self.assertEqual(p.deferrals.get(app="unknown", reason="connection"), 1)
         self.assertNotIn("CFE41A409C", p._senders)
+        # Dernier résultat par identifiant de file (relay-smoke-test).
+        self.assertEqual(p.outcome("CFE41A409C"), ("sent", ""))
+        self.assertEqual(p.outcome("E7E50A40BF"), ("deferred", "auth"))
+        self.assertIsNone(p.outcome("INCONNU1"))
+        p.feed(H + lines[1].replace("CFE41A409C", "1234ABCD"))
+        self.assertEqual(p.outcome("1234ABCD"), ("sent", ""))
 
     def test_expired_and_null_sender(self):
         reg, p = parser()
         p.feed(H + "postfix/qmgr[1]: ABC123: from=<>, size=10, nrcpt=1 (queue active)")
         p.feed(H + "postfix/qmgr[1]: ABC123: from=<>, status=expired, returned to sender")
         self.assertEqual(p.deliveries.get(app="none", status="expired"), 1)
+        self.assertEqual(p.outcome("ABC123"), ("expired", ""))
+
+    def test_outcomes_bounded(self):
+        reg, p = parser()
+        for i in range(logparse.MAX_OUTCOMES + 3):
+            p.feed(H + f"postfix/smtp[1]: Q{i:08d}: to=<a@example.com>, relay=x, status=sent (250 ok)")
+        self.assertIsNone(p.outcome("Q00000000"))
+        self.assertEqual(p.outcome(f"Q{logparse.MAX_OUTCOMES + 2:08d}"), ("sent", ""))
 
     def test_recipient_series_capped(self):
         reg, p = parser()
@@ -209,3 +223,113 @@ class SupervisorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+# Certificat autosigné de test (CN=smtp-relay), sans clé privée associée conservée.
+_CERT = """-----BEGIN CERTIFICATE-----
+MIIBgDCCASegAwIBAgIUSmnNGtNBrFhG9bnUSnlGDFc1v7MwCgYIKoZIzj0EAwIw
+FTETMBEGA1UEAwwKc210cC1yZWxheTAgFw0yNjEwMjUyMTE0NDhaGA8yMTI2MTAw
+MTIxMTQ0OFowFTETMBEGA1UEAwwKc210cC1yZWxheTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABPJHfs5/ijtpXj/3nCXQYJZTZOlMrT3TVDjecxB4aEXAnR+Q02HW
+e2L9WBNzJOvhKB1Yb2xY0Euh90/M3Ew4yRajUzBRMB0GA1UdDgQWBBTdIjGcG6eb
+HdpH2Bl9HGRyNAqZszAfBgNVHSMEGDAWgBTdIjGcG6ebHdpH2Bl9HGRyNAqZszAP
+BgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0cAMEQCIAnaqI4REqoo9hxU1AeT
+ee+pMDeiNd0BcrJao0GGn6UPAiA8fjTDXP2ZDJt2eXMG2lTO2JaqHrBqUjRbz8YV
+Pgj7IA==
+-----END CERTIFICATE-----
+"""
+
+
+class DeliveryEndpointTest(unittest.TestCase):
+    """GET /delivery?qid=… de l'exporteur et attente de relay-smoke-test."""
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        from http.server import ThreadingHTTPServer
+        from relayexp import server
+        reg, cls.p = parser()
+        cls.p.feed(H + "postfix/smtp[1]: AAAA1111: to=<a@example.com>, relay=x, status=sent (250 ok)")
+        cls.p.feed(H + "postfix/smtp[1]: BBBB2222: to=<a@example.com>, relay=none, status=deferred "
+                       "(Host or domain name not found. Name service error for name=provider type=A)")
+
+        class FakeExporter:
+            parser = cls.p
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.srv.exporter = FakeExporter()
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def test_endpoint(self):
+        from relayexp import smoke
+        self.assertEqual(smoke.delivery_status(self.url, "AAAA1111"),
+                         {"qid": "AAAA1111", "status": "sent", "reason": ""})
+        self.assertEqual(smoke.delivery_status(self.url, "BBBB2222")["reason"], "dns")
+        self.assertIsNone(smoke.delivery_status(self.url, "CCCC3333"))
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            smoke.delivery_status(self.url, "x%3Cy")
+        self.assertEqual(cm.exception.code, 400)
+
+    def test_wait_delivery(self):
+        from relayexp import smoke
+        self.assertEqual(smoke.wait_delivery(self.url, "AAAA1111", 2)[0], smoke.OK)
+        code, text = smoke.wait_delivery(self.url, "BBBB2222", 2)
+        self.assertEqual(code, smoke.FAILED)
+        self.assertIn("différée (motif : dns)", text)
+        code, text = smoke.wait_delivery(self.url, "CCCC3333", 0.5, interval=0.1)
+        self.assertEqual(code, smoke.UNCONFIRMED)
+        code, text = smoke.wait_delivery("http://127.0.0.1:9", "AAAA1111", 0.3, interval=0.1)
+        self.assertEqual(code, smoke.UNCONFIRMED)
+        self.assertIn("exporteur injoignable", text)
+
+
+class SmokeConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.dir)
+        self.inv = os.path.join(self.dir, "apps.toml")
+        with open(self.inv, "w") as f:
+            f.write('sender_domain = "example.com"\n'
+                    '[applications.supervision]\naddress = "supervision@example.com"\nclient_ips = ["127.0.0.1"]\n'
+                    '[applications.gitlab]\naddress = "gitlab@example.com"\nclient_ips = ["10.0.1.10"]\n')
+
+    def run_smoke(self, *args):
+        from relayexp import smoke
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = smoke.main(["--inventory", self.inv, "--secrets-dir", self.dir, *args])
+        return code, err.getvalue()
+
+    def test_config_errors(self):
+        from relayexp import smoke
+        self.assertEqual(self.run_smoke()[0], smoke.CONFIG)                                  # --to absent
+        code, err = self.run_smoke("--to", "s@example.com", "--app", "absente")
+        self.assertEqual(code, smoke.CONFIG)
+        self.assertIn("absente de l'inventaire", err)
+        code, err = self.run_smoke("--to", "s@example.com", "--app", "gitlab")
+        self.assertIn('client_ips = ["127.0.0.1"]', err)
+        code, err = self.run_smoke("--to", "s@example.com")                                 # secret absent
+        self.assertEqual(code, smoke.CONFIG)
+        self.assertIn("secret de l'application", err)
+
+    def test_leaf_certificate_and_message(self):
+        import ssl
+        from relayexp import smoke
+        der = ssl.PEM_cert_to_DER_cert(_CERT)
+        chain = os.path.join(self.dir, "chain.pem")
+        with open(chain, "w") as f:
+            f.write("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n" + _CERT + _CERT)
+        self.assertEqual(smoke.leaf_certificate(chain), der)
+        with self.assertRaises(smoke.SmokeError):
+            smoke.leaf_certificate(os.path.join(self.dir, "absent.pem"))
+        msg = smoke.control_message("supervision@example.com", "s@example.com", "example.com", "abc123")
+        self.assertEqual(msg["Subject"], "Contrôle du relai SMTP abc123")
+        self.assertTrue(msg["Message-ID"].endswith("@example.com>"))
+        self.assertIn("Jeton : abc123", msg.get_content())

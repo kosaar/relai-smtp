@@ -2,8 +2,11 @@
 non privilégié (nobody, groupe supplémentaire postdrop pour « postqueue -j »).
 
 Entrée standard : copie des journaux Postfix (relay-run). Sortie HTTP :
-  GET /metrics   métriques texte Prometheus
-  GET /healthz   « ok »
+  GET /metrics          métriques texte Prometheus
+  GET /healthz          « ok »
+  GET /delivery?qid=Q   dernier résultat de livraison du message Q (JSON :
+                        statut sent, deferred, bounced, expired et motif du
+                        différé ; 404 si inconnu) — utilisé par relay-smoke-test
 
 Métriques servies :
   - compteurs tirés des journaux (relayexp.logparse) ;
@@ -19,18 +22,22 @@ désactivé), RELAY_INVENTORY_FILE (/etc/relay/applications.toml).
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 from relayexp import probes
 from relayexp.logparse import AppMap, LogParser
 from relayexp.metrics import Registry
 
 log = logging.getLogger("relay-exporter")
+QID_RE = re.compile(r"^[0-9A-Za-z]{5,32}$")
 
 
 class Exporter:
@@ -93,9 +100,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _delivery(self, query: str) -> None:
+        qid = parse_qs(query).get("qid", [""])[0]
+        if not QID_RE.match(qid):
+            self._send(400, b'{"error": "qid"}\n', "application/json")
+            return
+        found = self.server.exporter.parser.outcome(qid)
+        status, reason = found if found else (None, "")
+        body = json.dumps({"qid": qid, "status": status, "reason": reason}).encode() + b"\n"
+        self._send(200 if found else 404, body, "application/json")
+
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
-        if path == "/metrics":
+        path, _, query = self.path.partition("?")
+        if path == "/delivery":
+            self._delivery(query)
+        elif path == "/metrics":
             body = self.server.exporter.render().encode()
             self._send(200, body, "text/plain; version=0.0.4; charset=utf-8")
         elif path == "/healthz":

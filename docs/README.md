@@ -24,12 +24,14 @@ GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Post
                                                            passerelle ──HTTPS (WKD)──▶ annuaire de clés ◀──HTTPS (dépôt)── Thunderbird
 ```
 
-> **Version 2 (en cours) :** le relai évolue vers un relai **chiffrant** (OpenPGP,
-> annuaire de clés, contrôle du contenu, supervision ; quotas non réalisés), lot par lot, selon
-> [plan-implementation.md](plan-implementation.md). Ce document décrit l'état
-> actuel. Le schéma détaillé se trouve dans [architecture.md](architecture.md).
-> Le guide [deploiement-production.md](deploiement-production.md) décrit encore
-> la version 1 (port 25, liste blanche seule) ; il sera réécrit au lot 8.
+> **Version 2 :** relai **chiffrant** (OpenPGP, annuaire de clés, contrôle du
+> contenu, nettoyage des en-têtes, supervision, test après déploiement), réalisé
+> lot par lot selon [plan-implementation.md](plan-implementation.md) ; les
+> quotas par application (lot 5) ne sont pas réalisés. Ce document est la
+> référence technique ; le schéma détaillé (5 zones, flux F1 à F10) se trouve
+> dans [architecture.md](architecture.md) et la mise en production (réseau,
+> fournisseur, annuaire, Thunderbird, recette, exploitation) dans
+> [deploiement-production.md](deploiement-production.md).
 
 > **Valeurs d'exemple :** fournisseur `smtp.example-provider.com:587`, GitLab
 > `10.0.1.10`, Jenkins `10.0.1.20`, domaine `example.com`. Elles sont à remplacer
@@ -65,7 +67,7 @@ GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Post
 ## 2. Contenu du dépôt et images
 
 ```
-docker-compose.yml        stack de production (services relay et gateway)
+docker-compose.yml        stack de production (services relay, gateway et keydir)
 docker-compose.test.yml   surcharge de test (fournisseur simulé, poste destinataire, clients, relai à mauvais identifiants)
 config/applications.toml  inventaire versionné des applications (login, adresse, IP, quota)
 config/content-rules.toml règles versionnées du contrôle du contenu sortant (passerelle)
@@ -74,7 +76,7 @@ relay/Dockerfile          image du relai (contexte de construction : racine du d
 relay/entrypoint.sh       validation de la configuration, génération de /etc/postfix, lancement
 relay/config/*.tmpl       templates de main.cf, master.cf et de la configuration SASL
 relay/scripts/            bibliothèque commune, healthcheck
-relay/exporter/relayexp/  processus principal relay-run (Postfix + journaux) et exporteur Prometheus
+relay/exporter/relayexp/  processus principal relay-run (Postfix + journaux), exporteur Prometheus, relay-smoke-test
 gateway/                  passerelle Python appelée par Postfix avant la mise en file (milter + filtre SMTP)
 keydir/                   annuaire de clés publiques OpenPGP (dépôt HTTPS, validation, WKD, révocations)
 test/provider/            fournisseur simulé (Postfix 587 TLS + SASL -> Dovecot IMAPS) et PKI de test
@@ -87,7 +89,7 @@ tests/suites/NN-*.sh      une suite de tests par lot
 tests/fixtures/           inventaire de la stack de test
 tests/unit/               tests unitaires des modules Python purs
 tests/ci/lint.sh          contrôles statiques (shellcheck, Python, tests unitaires)
-.gitlab-ci.yml            CI : lint, relay-config check, tests d'intégration, publication des images
+.gitlab-ci.yml            CI/CD : lint, inventaire et règles, tests d'intégration, images, déploiement + relay-smoke-test
 ```
 
 ### Images Docker
@@ -306,6 +308,11 @@ capacité, et ne lit que des métadonnées :
 | `keydir_keys{state}`, `keydir_key_expiry_timestamp_seconds{email}` | clés par état (dont `pending` : en attente de validation) ; expiration de chaque clé publiée |
 | `relay_queue_scrape_ok`, `relay_keydir_metrics_up` | lecture de la file et de l'annuaire réussie |
 
+L'exporteur sert aussi `GET /delivery?qid=<QUEUE_ID>` : dernier résultat de
+livraison connu du message (`{"qid", "status", "reason"}`, sans adresse ;
+`404` si inconnu), conservé pour les 5000 derniers messages ; il est utilisé
+par `relay-smoke-test`.
+
 Exemples d'alertes (PromQL) :
 
 ```
@@ -375,8 +382,11 @@ quota_per_hour = 500               # optionnel
 Règles vérifiées (toutes les erreurs sont listées ensemble) : clés connues
 uniquement ; nom en minuscules (`[a-z][a-z0-9-]`, 32 caractères au plus) ;
 adresse dans `sender_domain` et attribuée à une seule application ; au moins
-une IP d'hôte, ni CIDR, ni `0.0.0.0`, ni boucle locale, ni multicast ; quota
-entier de 1 à 100 000 ; au moins une application.
+une IP d'hôte, ni CIDR, ni `0.0.0.0`, ni multicast ; quota entier de 1 à
+100 000 ; au moins une application. Une adresse de bouclage n'est admise que
+sous la forme `127.0.0.1` (ou `::1`) et comme **seule** IP d'une application :
+celle-ci est alors locale au conteneur du relai, son login n'étant utilisable
+que depuis le relai lui-même (application `supervision` de `relay-smoke-test`).
 
 ```bash
 PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
@@ -414,6 +424,7 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 | `RELAY_METRICS_BIND_ADDRESS` | IP de l'hôte sur laquelle publier les métriques (compose) | `127.0.0.1` | non |
 | `RELAY_METRICS_PUBLISHED_PORT` | port des métriques publié sur l'hôte | `9154` | non |
 | `RELAY_METRICS_PROBE_INTERVAL` | intervalle de la sonde TLS du smarthost, en secondes (5 à 86400) | `300` | non |
+| `RELAY_SMOKE_TO` | BAL de supervision, destinataire du message de contrôle de `relay-smoke-test` (clé validée sur l'annuaire) | — | pour `relay-smoke-test` |
 
 Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`,
 `GATEWAY_CONTENT_RULES_FILE=/etc/relay/content-rules.toml`
@@ -431,7 +442,7 @@ défaut dans l'image : `RELAY_METRICS_ENABLED=yes`, `RELAY_METRICS_LISTEN=0.0.0.
 |--------|--------------|------|
 | `relay_smtp_username`, `relay_smtp_password` | `secrets/relay_smtp_*` | identifiants chez le fournisseur |
 | `relay_tls_cert`, `relay_tls_key` | `secrets/relay_tls_*` | certificat et clé de `smtp-relay` (port 587) |
-| `keydir_tls_cert`, `keydir_tls_key` | `secrets/keydir_tls_*` | certificat et clé de l'annuaire (`openpgpkey.<domaine>`) |
+| `keydir_tls_cert`, `keydir_tls_key` | `secrets/keydir_tls_*` | certificat et clé de l'annuaire : SAN `openpgpkey.<domaine>` (postes, WKD) et `keydir` (nom interne vérifié par la passerelle, AC désignée par `GATEWAY_KEYDIR_CA_FILE`, par exemple `config/ca-interne.pem` vu en `/etc/relay/ca-interne.pem`) |
 | `gateway_hmac_key` | `secrets/gateway_hmac_key` | clé de pseudonymisation des identifiants de message (32 caractères minimum) |
 | — | `secrets/apps/<application>` | mot de passe SMTP de chaque application (16 caractères minimum, une ligne) |
 
@@ -450,6 +461,29 @@ PYTHONPATH=common python3 -m relaycfg check --secrets-dir secrets/apps --invento
 docker compose up -d --build
 docker compose ps                       # relay, gateway et keydir doivent afficher (healthy)
 docker compose logs relay               # résumé de la configuration au démarrage
+docker compose exec relay relay-smoke-test   # message de contrôle accepté par le smarthost (code 0)
+```
+
+`relay-smoke-test` est le test après déploiement (exécuté aussi par le job
+`deploy` de la CI) : il soumet, depuis le conteneur du relai, un message de
+contrôle de l'application locale `supervision` vers `RELAY_SMOKE_TO`, par le
+chemin réel (587 en STARTTLS, passerelle, annuaire, chiffrement, file), puis
+attend que l'exporteur ait vu sa livraison au smarthost
+(`GET /delivery?qid=…`). Le message arrive chiffré dans la BAL de
+supervision, dont la clé est validée sur l'annuaire comme celle de tout
+destinataire.
+
+| Code | Signification |
+|:----:|---------------|
+| 0 | message accepté par le smarthost (`status=sent`) |
+| 1 | échec : refus à la soumission (réponse SMTP affichée), livraison différée (motif : `auth`, `tls`, `dns`, `connection`…), rejetée ou expirée |
+| 2 | configuration invalide : application absente ou non locale, secret illisible, `RELAY_SMOKE_TO` vide |
+| 3 | non confirmé dans le délai (`--timeout`, 60 s) : exporteur injoignable ou file lente ; l'état du message en file est affiché |
+
+```
+relay-smoke-test : supervision@example.com -> supervision@example.com (application supervision, 127.0.0.1:587), objet « Contrôle du relai SMTP 24723027a6af »
+  soumis et chiffré : 250 2.0.0 Ok: queued as E16D9A4054
+OK : message de contrôle E16D9A4054 : accepté par le smarthost (status=sent)
 ```
 
 Les services sont configurés pour la production avec :
@@ -510,6 +544,8 @@ relai (`docker compose restart relay`), puis mettez à jour l'application.
 | Configuration effective | `docker compose exec relay postconf -n` |
 | Vérifier l'inventaire dans le conteneur | `docker compose exec relay relay-config check` |
 | Métriques (depuis l'hôte) | `curl -s http://127.0.0.1:9154/metrics` |
+| Test de bout en bout (message de contrôle) | `docker compose exec relay relay-smoke-test` |
+| Résultat de livraison d'un message | `curl -s 'http://127.0.0.1:9154/delivery?qid=<QUEUE_ID>'` |
 
 Exemples de lignes de log :
 
@@ -638,7 +674,7 @@ vérifié) depuis le poste de travail.
 | `relay-badcreds` | 10.0.1.6 / 10.0.2.6 / 10.0.3.6 | même image, mot de passe erroné chez le fournisseur |
 | `gateway` | 10.0.3.20:9900 et :10025 | passerelle (milter, filtre avant file) |
 | `keydir` | 10.0.2.30:8443 (alias `openpgpkey.example.com`) / 10.0.3.30 | annuaire de clés (HTTPS, WKD), domaines `example.com` et `partner.test` |
-| `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
+| `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@`, `supervision@example.com` et `ext@partner.test`, consultables en IMAPS |
 | `workstation` | 10.0.2.50 | poste destinataire : génère ses clés avec RNP et les dépose sur l'annuaire (outil `keys`), relève les BAL en IMAPS et déchiffre avec RNP (outils `mailbox`, `pgpmime`) |
 
 Les réseaux Docker de test (`private`, `internet`, `backend`) sont `internal`,
@@ -697,6 +733,7 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 | IT7.3 | date d'expiration du certificat du smarthost (sonde TLS) = celle du certificat de test (`openssl`), certificat vérifié |
 | IT7.4 | clé expirant dans 10 jours (GnuPG) déposée et validée : signalée « proche de l'expiration » ; révoquée par l'administrateur : signalée révoquée |
 | IT7.5 | aucun objet ni corps de message de test (marqueurs de toutes les suites) dans les journaux d'aucun conteneur ; témoin : le marqueur est bien dans le message déchiffré |
+| IT8.1 | `relay-smoke-test` (application locale `supervision` → BAL de supervision, clé publiée comme en production) : code 0 sur la stack de test, message livré chiffré et déchiffré ; fournisseur arrêté : code 1 (livraison différée), message livré après la relance ; identifiants du relai refusés (`relay-badcreds`) : code 1, motif `auth` ; application non locale : code 2 |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -758,3 +795,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 | Métriques absentes (`curl` sans réponse sur 9154) | `RELAY_METRICS_BIND_ADDRESS` ou pare-feu ; dans les logs du relai, `relay-exporter: métriques sur …` au démarrage, `relay-run: exporteur de métriques arrêté` en cas d'arrêt (il est relancé). |
 | `relay_keydir_metrics_up 0` | Annuaire arrêté, ou `KEYDIR_METRICS_LISTEN` vide. |
 | `relay_smarthost_up 0` alors que les mails partent | Sortie filtrée pour les connexions de sonde, ou intervalle trop long : la dernière sonde date de `relay_smarthost_last_probe_timestamp_seconds`. |
+| `relay-smoke-test` : `ÉCHEC : … RCPT TO refusé : 550 5.7.1 No valid OpenPGP key` | La clé de la BAL de supervision (`RELAY_SMOKE_TO`) n'est pas validée sur l'annuaire (ou a expiré) : la déposer et la valider (`keydir-admin approve`). |
+| `relay-smoke-test` : `ÉCHEC : … This login is not allowed from this host` ou code 2 « doit être locale » | L'application `supervision` n'a pas `client_ips = ["127.0.0.1"]` dans l'inventaire. |
+| `relay-smoke-test` : `livraison différée (motif : …)` | Le message est accepté et chiffré mais le smarthost ne le prend pas : `auth` (identifiants du fournisseur), `tls` (certificat), `dns`/`connection` (sortie, pare-feu). Il reste en file et repart seul une fois la cause corrigée (`postqueue -f`). |
+| `relay-smoke-test` : `NON CONFIRMÉ : exporteur injoignable` (code 3) | `RELAY_METRICS_ENABLED=no` ou exporteur arrêté : le résultat de livraison n'est lu que par l'exporteur ; contrôler `status=sent` dans les logs du relai. |

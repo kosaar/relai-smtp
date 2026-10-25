@@ -1,7 +1,7 @@
 # Plan d'implémentation : relais SMTP applicatif chiffrant (OpenPGP)
 
 > Statut : **validé le 2026-10-25 (toutes les décisions D1 à D12 acceptées)**. Implémentation lot par lot, un commit poussé par lot.
-> Avancement : lots 0 à 4, 6 et 7 terminés ; lot 5 (quotas) non réalisé, à la demande.
+> Avancement : lots 0 à 4 et 6 à 8 terminés ; lot 5 (quotas) non réalisé, à la demande.
 > Base : branche `claude/vigilant-mccarthy-kgzh0e` (relai Postfix, liste blanche IP,
 > TLS + SASL vers le fournisseur, 19 tests d'intégration verts).
 > Branche de travail : `claude/gallant-shannon-7yirrk`.
@@ -258,6 +258,24 @@ dépassements de quota.
 | Test | Attendu |
 |---|---|
 | IT8.1 | `relay-smoke-test` réussit sur la stack de test et échoue (code ≠ 0) quand le fournisseur est arrêté |
+
+- **Réalisé** : `relay-smoke-test`, lancé dans le conteneur du relai (à la main
+  ou par le job `deploy` de la CI), soumet un message de contrôle de
+  l'application locale `supervision` (inventaire : `client_ips =
+  ["127.0.0.1"]`, seule adresse de bouclage admise, et seule IP de
+  l'application) vers la BAL de supervision `RELAY_SMOKE_TO`, par le chemin
+  réel (587 STARTTLS avec certificat comparé à celui du relai, passerelle,
+  annuaire, chiffrement), puis lit le résultat de livraison auprès de
+  l'exporteur (`GET /delivery?qid=…`). Codes : 0 accepté par le smarthost,
+  1 échec (refus, différé avec son motif, rejet), 2 configuration, 3 non
+  confirmé. `.gitlab-ci.yml` : lint, validation de l'inventaire et des règles
+  de contenu, intégration, images, déploiement idempotent sur l'hôte (tag,
+  manuel) suivi de `relay-smoke-test`, test planifié. Suite 08 : IT8.1 (code 0
+  et message déchiffré ; fournisseur arrêté : code 1 ; identifiants du relai
+  refusés : code 1, motif `auth` ; application non locale : code 2).
+  Documentation : architecture (5 zones, flux F1 à F10), guide de mise en
+  production réécrit (réseau et pare-feu, fournisseur, DNS, annuaire et
+  vérification des clés, Thunderbird, recette, exploitation).
 
 ---
 
