@@ -130,6 +130,9 @@ configure() {
     MESSAGE_SIZE_LIMIT=${MESSAGE_SIZE_LIMIT:-10240000}
     [[ $MESSAGE_SIZE_LIMIT =~ ^[0-9]+$ ]] && (( MESSAGE_SIZE_LIMIT >= 102400 )) \
         || die "MESSAGE_SIZE_LIMIT='${MESSAGE_SIZE_LIMIT}' invalide (octets, >= 102400)."
+    # Taille en file (après chiffrement) : marge de 50 % pour l'armure OpenPGP.
+    # shellcheck disable=SC2034  # utilisée par render (master.cf.tmpl)
+    QUEUE_SIZE_LIMIT=$(( MESSAGE_SIZE_LIMIT * 3 / 2 ))
 
     QUEUE_LIFETIME=${QUEUE_LIFETIME:-5d}
     [[ $QUEUE_LIFETIME =~ ^[0-9]+[smhdw]$ ]] || die "QUEUE_LIFETIME='${QUEUE_LIFETIME}' invalide (ex. 5d, 12h)."

@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from keydir import config as config_mod
-from keydir import openpgp, policy
+from pgpkeys import openpgp, policy
 from keydir.store import Store, StoreError
 
 log = logging.getLogger("keydir")

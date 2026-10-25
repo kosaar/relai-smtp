@@ -26,6 +26,7 @@ x-relay-test-env: &relay-test-env
   RELAY_TLS_CERT_FILE: /etc/test-pki/smtp-relay.crt
   RELAY_TLS_KEY_FILE: /etc/test-pki/smtp-relay.key
   RELAY_AUTH_RATE_LIMIT: "1000"
+  MESSAGE_SIZE_LIMIT: "5242880"
 
 x-depends-relay: &depends-relay
   provider:
@@ -113,8 +114,12 @@ services:
       start_period: 10s
 
   gateway:
+    environment:
+      GATEWAY_KEYDIR_CA_FILE: /etc/test-pki/ca.crt
+      GATEWAY_KEY_CACHE_TTL: "5"
     volumes: !override
       - ./tests/.work/config:/etc/relay:ro
+      - test-pki:/etc/test-pki:ro
     networks: !override
       backend:
         ipv4_address: 10.0.3.20

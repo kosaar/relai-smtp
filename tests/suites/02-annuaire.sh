@@ -4,8 +4,9 @@
 #  générée par RNP), validation par l'administrateur, publication WKD (URL
 #  calculée par gpg-wks-client, clé relue par GnuPG), refus motivés, rotation,
 #  révocation, TLS, persistance.
-#  État laissé pour les suites suivantes : clés validées pour alice@, bob@ et
-#  ext@partner.test (privées dans le poste, RNP) ; aucune clé pour carol@.
+#  État laissé pour les suites suivantes : clés validées pour alice@ (après
+#  rotation), bob@ et ext@partner.test (privées dans le poste, RNP) ; aucune
+#  clé pour carol@.
 # =============================================================================
 suite "02 — annuaire de clés publiques (keydir)"
 
@@ -17,42 +18,43 @@ http_code() { sed -n 's/^HTTP_CODE=//p' <<<"$1"; }
 json_state() { head -1 <<<"$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null; }
 wkd_fpr() { ws keys wkd-show "$1" 2>/dev/null | awk '{print $1}'; }
 
+# Clés publiées au démarrage (run-tests.sh) : alice@, bob@, ext@partner.test.
+fpr_alice=$(ws keys fpr alice@example.com)
+
 # --- IT2.1 : clé générée par RNP, déposée en HTTPS : en attente, absente du WKD ---
-fpr_alice=$(ws keys gen alice@example.com)
-out=$(deposit alice@example.com keys export alice@example.com)
-st=$(ws keys status alice@example.com)
-wkd_out=$(ws keys wkd alice@example.com 2>&1 >/dev/null) && wkd_rc=0 || wkd_rc=$?
-if [[ $(http_code "$out") == 202 && $(json_state "$st") == pending && $st == *"$fpr_alice"* ]] \
+fpr_frank=$(ws keys gen frank@example.com)
+out=$(deposit frank@example.com keys export frank@example.com)
+st=$(ws keys status frank@example.com)
+wkd_out=$(ws keys wkd frank@example.com 2>&1 >/dev/null) && wkd_rc=0 || wkd_rc=$?
+if [[ $(http_code "$out") == 202 && $(json_state "$st") == pending && $st == *"$fpr_frank"* ]] \
     && (( wkd_rc == 1 )) && [[ $wkd_out == *"HTTP 404"* ]]; then
-    pass "IT2.1 clé RNP d'alice déposée en HTTPS (certificat vérifié) : état « pending », WKD 404"
-    note "empreinte (RNP) : ${fpr_alice}"
+    pass "IT2.1 clé RNP de frank déposée en HTTPS (certificat vérifié) : état « pending », WKD 404"
+    note "empreinte (RNP) : ${fpr_frank}"
 else
     fail "IT2.1 dépôt inattendu (dépôt : $(http_code "$out"), état : $(json_state "$st"), WKD : ${wkd_out})" "$out"
 fi
 
 # --- IT2.2 : validation par l'administrateur (empreinte comparée hors bande) -----
-out=$(admin approve alice@example.com 0000000000000000000000000000000000000000 2>&1) && rc=0 || rc=$?
-if (( rc != 0 )) && [[ $out == *"aucune clé en attente"* ]] && [[ -z $(wkd_fpr alice@example.com) ]]; then
+out=$(admin approve frank@example.com 0000000000000000000000000000000000000000 2>&1) && rc=0 || rc=$?
+if (( rc != 0 )) && [[ $out == *"aucune clé en attente"* ]] && [[ -z $(wkd_fpr frank@example.com) ]]; then
     pass "IT2.2a validation avec une empreinte différente : refusée, rien de publié"
 else
     fail "IT2.2a validation avec une mauvaise empreinte acceptée (rc=$rc)" "$out"
 fi
-admin approve alice@example.com "$fpr_alice" >/dev/null
-show=$(ws keys wkd-show alice@example.com || true)
-if [[ $(awk '{print $1}' <<<"$show") == "$fpr_alice" && $(awk '{print $3}' <<<"$show") == alice@example.com ]]; then
+admin approve frank@example.com "$fpr_frank" >/dev/null
+show=$(ws keys wkd-show frank@example.com || true)
+if [[ $(awk '{print $1}' <<<"$show") == "$fpr_frank" && $(awk '{print $3}' <<<"$show") == frank@example.com ]]; then
     pass "IT2.2b après validation, le WKD sert la clé : empreinte identique à celle du poste (GnuPG lit la clé RNP)"
-    note "WKD : $(ws keys wkd-url alice@example.com)"
+    note "WKD : $(ws keys wkd-url frank@example.com)"
 else
-    fail "IT2.2b le WKD ne sert pas la clé attendue" "attendu ${fpr_alice}, obtenu : ${show}"
+    fail "IT2.2b le WKD ne sert pas la clé attendue" "attendu ${fpr_frank}, obtenu : ${show}"
 fi
 ok=1
-for email in bob@example.com ext@partner.test; do
-    f=$(ws keys gen "$email")
-    out=$(deposit "$email" keys export "$email")
-    [[ $(http_code "$out") == 202 ]] && admin approve "$email" "$f" >/dev/null && [[ $(wkd_fpr "$email") == "$f" ]] || ok=0
+for email in alice@example.com bob@example.com ext@partner.test; do
+    [[ $(wkd_fpr "$email") == "$(ws keys fpr "$email")" ]] || { ok=0; note "écart : ${email}"; }
 done
-(( ok )) && pass "IT2.2c clés de bob@example.com et ext@partner.test (second domaine) déposées, validées et publiées" \
-         || fail "IT2.2c publication des clés de bob ou ext impossible"
+(( ok )) && pass "IT2.2c clés d'alice, bob et ext@partner.test (second domaine) servies par le WKD, identiques à celles du poste" \
+         || fail "IT2.2c une clé publiée au démarrage n'est pas servie correctement"
 
 # --- IT2.3 : dépôts refusés (motif explicite, état inchangé) -----------------------
 it23() {  # it23 <libellé> <adresse> <motif attendu> <commande produisant le contenu>
@@ -74,7 +76,7 @@ it23 "RSA 2048 (défaut de RNP)"     rsa2048@example.com "RSA 2048"             
 it23 "UID différent"                carol@example.com "aucune identité (UID) valide pour carol@example.com" keys export bob@example.com
 it23 "contenu invalide"             alice@example.com "contenu illisible"             echo "ceci n est pas une cle"
 it23 "domaine non géré"             alice@other.test "domaine 'other.test' non géré"  keys export alice@example.com
-f_erin=$(ws keys gen-rsa erin@example.com 3072)
+ws keys gen-rsa erin@example.com 3072 >/dev/null
 out=$(deposit erin@example.com keys export erin@example.com)
 [[ $(http_code "$out") == 202 ]] && pass "IT2.3 RSA 3072 : accepté (en attente)" \
                                  || fail "IT2.3 RSA 3072 refusé" "$out"
@@ -97,6 +99,7 @@ if [[ $(http_code "$out") == 202 && $before == "$fpr_alice" && $after == "$fpr_a
 else
     fail "IT2.4 rotation incorrecte (avant : ${before}, après : ${after}, états : ${states})"
 fi
+# shellcheck disable=SC2016  # développé dans le conteneur
 npub=$(ws bash -c 'h=$(mktemp -d); keys wkd alice@example.com | gpg --homedir "$h" --batch --with-colons --show-keys 2>/dev/null' | grep -c '^pub' || true)
 if [[ $npub == 1 ]]; then
     pass "IT2.4 le WKD ne sert qu'une seule clé (la nouvelle)"

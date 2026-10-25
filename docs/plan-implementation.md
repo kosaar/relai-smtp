@@ -1,7 +1,7 @@
 # Plan d'implémentation : relais SMTP applicatif chiffrant (OpenPGP)
 
 > Statut : **validé le 2026-10-25 (toutes les décisions D1 à D12 acceptées)**. Implémentation lot par lot, un commit poussé par lot.
-> Avancement : lots 0, 1 et 2 terminés.
+> Avancement : lots 0 à 3 terminés.
 > Base : branche `claude/vigilant-mccarthy-kgzh0e` (relai Postfix, liste blanche IP,
 > TLS + SASL vers le fournisseur, 19 tests d'intégration verts).
 > Branche de travail : `claude/gallant-shannon-7yirrk`.
@@ -84,7 +84,7 @@ avant que Postfix l'accepte (`250 queued`). Si la passerelle ne répond pas,
 | D1 | Liste blanche IP existante | **Conservée** en défense en profondeur, en plus du SASL (un identifiant volé ne sert pas hors du VLAN Applications). |
 | D2 | Ruptures de compatibilité | **Port 25 supprimé** (F8) et **réécriture d'expéditeur supprimée** au profit de la liaison login ↔ adresse. Version 2.0.0. |
 | D3 | Inventaire des applications | `config/applications.toml` (nom, adresse expéditrice, quota, IP) + un secret par application `secrets/apps/<nom>` (répertoire monté, pour qu'ajouter une application ne demande pas de modifier `docker-compose.yml`). Validé par `relay-config check`, utilisé aussi en CI. Ajouter une application = une entrée + un secret. |
-| D4 | Format chiffré | PGP/MIME (RFC 3156) avec **en-têtes protégés** (`protected-headers="v1"`, lus par Thunderbird) : objet réel chiffré, objet extérieur neutre configurable. Un seul message chiffré pour tous les destinataires d'une transaction, identifiants de clés masqués (`--throw-keyids`) pour ne pas trahir les Cci. |
+| D4 | Format chiffré | PGP/MIME (RFC 3156) avec **en-têtes protégés** (`protected-headers="v1"`, lus par Thunderbird) : objet réel chiffré, objet extérieur neutre configurable. Un seul message chiffré pour tous les destinataires d'une transaction, identifiants de clés masqués (`--throw-keyids`) pour ne pas trahir les Cci. **Ajusté au lot 3** : identifiants masqués seulement pour un destinataire unique. Avec plusieurs destinataires, RNP 0.18 (la bibliothèque de Thunderbird) n'essaie que le premier destinataire masqué : les suivants ne pourraient pas déchiffrer (constaté en test). Les identifiants restent donc visibles dans ce cas, et un destinataire en Cci est détectable par les autres via l'identifiant de sa sous-clé. |
 | D5 | Échec fermé | Destinataire sans clé valide (absente, expirée, révoquée, sans sous-clé de chiffrement) : `550 5.7.1` au `RCPT TO`, pour ce destinataire. Passerelle ou annuaire injoignable : `451 4.7.1` (l'application réessaie). Jamais d'envoi en clair. |
 | D6 | Annuaire | Service léger `keydir` : dépôt HTTPS, validation admin par CLI (comparaison d'empreinte hors bande), publication **WKD** (standard lu par Thunderbird et GnuPG), certificat de révocation appliqué immédiatement, rotation = nouvelle clé validée qui remplace l'ancienne. La passerelle interroge le WKD de l'annuaire avec un cache (TTL configurable, 5 min par défaut). |
 | D7 | Quotas | Messages par heure et par application, fenêtre glissante, compteurs SQLite persistants (survivent au redémarrage). Dépassement : `452 4.7.1` temporaire. |
@@ -173,9 +173,9 @@ en IMAPS dans la BAL Dovecot.
 | IT3.2 | La clé de bob ne déchiffre pas le message d'alice |
 | IT3.3 | carol (sans clé) : `550 5.7.1` au `RCPT TO`, rien en file ni en BAL |
 | IT3.4 | alice + carol : carol refusée, alice livrée chiffrée |
-| IT3.5 | alice + bob : un seul message, déchiffrable par chacun ; identifiants de clés masqués |
+| IT3.5 | alice + bob : un seul message, déchiffrable par chacun ; identifiants de clés masqués pour un destinataire unique, visibles à plusieurs (voir D4) |
 | IT3.6 | Clé expirée ou révoquée (lot 2) : refus après expiration du cache |
-| IT3.7 | Passerelle arrêtée : `451`, rien de livré ; passerelle relancée : le renvoi réussit |
+| IT3.7 | Passerelle arrêtée : erreur temporaire (Postfix répond `454 4.3.0`), rien de livré ; passerelle relancée : le renvoi réussit |
 | IT3.8 | Annuaire arrêté, cache vide : `451`, rien de livré |
 | IT3.9 | Après rotation, le message suivant n'est déchiffrable qu'avec la nouvelle clé |
 | IT3.10 | Destinataire externe avec clé validée : livré chiffré ; sans clé : refusé |
@@ -242,6 +242,8 @@ en IMAPS dans la BAL Dovecot.
 | Risque | Parade |
 |---|---|
 | Affichage des en-têtes protégés dans Thunderbird | Structure MIME conforme à celle produite par Thunderbird ; vérification manuelle dans Thunderbird pendant la recette |
+| Destinataires masqués et RNP | RNP 0.18 n'essaie que le premier destinataire masqué : identifiants masqués réservés aux messages à destinataire unique (D4). Recette : vérifier dans Thunderbird le déchiffrement d'un message à destinataire unique (identifiant masqué) et d'un message à plusieurs destinataires |
+| Taille du message chiffré | L'armure ASCII grossit le message : `cleanup` accepte 1,5 × `MESSAGE_SIZE_LIMIT` (la limite annoncée aux applications reste `MESSAGE_SIZE_LIMIT`) ; la limite du fournisseur doit être au moins égale à 1,5 × `MESSAGE_SIZE_LIMIT` |
 | Robustesse de `python3-milter` | Paquet Ubuntu maintenu ; repli possible sur `smtpd_proxy_filter` (même passerelle, autre transport) |
 | Lecture des logs Postfix par l'exporteur | Prototype dès le lot 7 (FIFO ou fichier tmpfs relu) avant d'en dépendre |
 | Limite de débit Docker Hub pendant les constructions | Images de base mises en cache, nouvelles tentatives |

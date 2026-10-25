@@ -95,6 +95,13 @@ if ! dc up -d --wait --wait-timeout 180; then
     exit 1
 fi
 
+# Destinataires des tests : chacun a une clé validée sur l'annuaire (sans clé,
+# la passerelle refuse le destinataire). carol@example.com n'en a volontairement pas.
+info "Clés des destinataires : alice@example.com, bob@example.com, ext@partner.test"
+for email in alice@example.com bob@example.com ext@partner.test; do
+    provision_key "$email" || { echo "Impossible de publier la clé de ${email}." >&2; exit 1; }
+done
+
 for f in "${SUITE_FILES[@]}"; do
     # shellcheck source=/dev/null
     . "$f"

@@ -95,7 +95,8 @@ services:
       start_period: 20s
       retries: 3
 
-  # Passerelle : appelée par Postfix (milter) avant la mise en file.
+  # Passerelle : appelée par Postfix (milter) avant la mise en file ; refuse
+  # les destinataires sans clé valide et chiffre chaque message (PGP/MIME).
   gateway:
     <<: *hardening
     build:
@@ -108,6 +109,11 @@ services:
     restart: unless-stopped
     environment:
       GATEWAY_INVENTORY_FILE: /etc/relay/applications.toml
+      # Annuaire de clés (WKD) : HTTPS vérifié par l'AC indiquée.
+      GATEWAY_KEYDIR_URL: https://keydir:8443
+      GATEWAY_KEYDIR_CA_FILE: ${GATEWAY_KEYDIR_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
+      GATEWAY_KEY_CACHE_TTL: ${GATEWAY_KEY_CACHE_TTL:-300}
+      GATEWAY_NEUTRAL_SUBJECT: ${GATEWAY_NEUTRAL_SUBJECT:-Message chiffré}
       TZ: ${TZ:-UTC}
     volumes:
       - ./config:/etc/relay:ro

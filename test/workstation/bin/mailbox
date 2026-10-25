@@ -2,20 +2,35 @@
 """Lecture des BAL du fournisseur simulé en IMAPS (certificat vérifié).
 
 Usage :
-  mailbox fetch <bal> --match TEXTE [--wait S]   message brut (premier qui contient TEXTE)
+  mailbox fetch <bal> --match TEXTE [--wait S] [--decrypted]
+        premier message contenant TEXTE : message brut (ou, avec --decrypted,
+        sa partie déchiffrée)
   mailbox count <bal> [--match TEXTE]            nombre de messages (contenant TEXTE)
   mailbox purge <bal>                            supprime tous les messages
+
+Les messages chiffrés (PGP/MIME) sont déchiffrés avec RNP et les trousseaux du
+poste pour cette adresse (~/.rnp/<bal>, archives comprises) : TEXTE est
+cherché dans le message brut puis dans sa partie déchiffrée (comme
+l'utilisateur la voit dans Thunderbird). Les déchiffrements sont mis en cache
+par UID IMAP dans ~/.cache/mailbox.
 
 Variables : IMAP_HOST (provider), IMAP_PORT (993), IMAP_CAFILE (/pki/ca.crt),
 MAILBOX_PASSWORD_FILE (/run/secrets/mailbox_password).
 Code de sortie : 0 si trouvé, 1 sinon, 2 en cas d'erreur IMAP/TLS.
 """
 import argparse
+import hashlib
 import imaplib
 import os
+import re
 import ssl
 import sys
 import time
+
+sys.path.insert(0, "/usr/local/lib/workstation")
+import wsmail  # noqa: E402
+
+CACHE = os.path.expanduser(os.environ.get("MAILBOX_CACHE", "~/.cache/mailbox"))
 
 
 def connect(user: str) -> imaplib.IMAP4_SSL:
@@ -32,19 +47,48 @@ def connect(user: str) -> imaplib.IMAP4_SSL:
 
 
 def messages(imap: imaplib.IMAP4_SSL):
-    _, data = imap.search(None, "ALL")
-    for num in data[0].split():
-        _, parts = imap.fetch(num, "(BODY.PEEK[])")
-        yield num, parts[0][1]
+    """(uidvalidity, uid, message brut) de chaque message."""
+    uidvalidity = (imap.response("UIDVALIDITY")[1] or [b"0"])[0].decode()
+    _, data = imap.uid("SEARCH", None, "ALL")
+    for uid in data[0].split():
+        _, parts = imap.uid("FETCH", uid, "(BODY.PEEK[])")
+        for item in parts:
+            if isinstance(item, tuple):
+                yield uidvalidity, uid.decode(), item[1]
+                break
 
 
-def matching(user: str, match: str | None) -> list[bytes]:
+def decrypted(user: str, uidvalidity: str, uid: str, raw: bytes) -> bytes | None:
+    """Partie déchiffrée d'un message PGP/MIME (cache par UID), None sinon."""
+    if b"multipart/encrypted" not in raw:
+        return None
+    homes = wsmail.homes_for(user)
+    tag = hashlib.sha256("|".join(homes).encode()).hexdigest()[:12]
+    path = os.path.join(CACHE, user, f"{uidvalidity}-{uid}-{tag}")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        return data[1:] if data[:1] == b"+" else None
+    plain, _ = wsmail.decrypt(raw, homes)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"+" + plain if plain is not None else b"-")
+    return plain
+
+
+def matching(user: str, match: str | None) -> list[tuple[bytes, bytes | None]]:
+    """[(brut, déchiffré)] des messages contenant `match` (brut ou déchiffré)."""
     imap = connect(user)
+    found = []
     try:
         needle = match.encode() if match else None
-        return [raw for _, raw in messages(imap) if needle is None or needle in raw]
+        for uidvalidity, uid, raw in messages(imap):
+            plain = decrypted(user, uidvalidity, uid, raw)
+            if needle is None or needle in raw or (plain is not None and needle in plain):
+                found.append((raw, plain))
     finally:
         imap.logout()
+    return found
 
 
 def main() -> int:
@@ -54,12 +98,16 @@ def main() -> int:
     f.add_argument("mailbox")
     f.add_argument("--match", required=True)
     f.add_argument("--wait", type=float, default=0)
+    f.add_argument("--decrypted", action="store_true")
     c = sub.add_parser("count")
     c.add_argument("mailbox")
     c.add_argument("--match")
     g = sub.add_parser("purge")
     g.add_argument("mailbox")
     a = p.parse_args()
+    if not re.fullmatch(r"[a-z0-9._+-]+@[a-z0-9.-]+", a.mailbox):
+        print(f"mailbox: adresse invalide : {a.mailbox}", file=sys.stderr)
+        return 2
 
     try:
         if a.cmd == "fetch":
@@ -67,7 +115,14 @@ def main() -> int:
             while True:
                 found = matching(a.mailbox, a.match)
                 if found:
-                    sys.stdout.buffer.write(found[0])
+                    raw, plain = found[0]
+                    if a.decrypted:
+                        if plain is None:
+                            print("mailbox: message trouvé mais non chiffré ou indéchiffrable", file=sys.stderr)
+                            return 1
+                        sys.stdout.buffer.write(plain)
+                    else:
+                        sys.stdout.buffer.write(raw)
                     return 0
                 if time.monotonic() >= deadline:
                     return 1

@@ -23,5 +23,5 @@ install -o keydir -g keydir -m 0600 "$key" /run/keydir/tls/key.pem
 install -d -o keydir -g keydir -m 0700 /var/lib/keydir /tmp/keydir
 chown -R keydir:keydir /var/lib/keydir
 
-export KEYDIR_TLS_CERT=/run/keydir/tls/cert.pem KEYDIR_TLS_KEY=/run/keydir/tls/key.pem KEYDIR_TMP=/tmp/keydir
+export KEYDIR_TLS_CERT=/run/keydir/tls/cert.pem KEYDIR_TLS_KEY=/run/keydir/tls/key.pem PGP_TMPDIR=/tmp/keydir
 exec setpriv --reuid=keydir --regid=keydir --init-groups --inh-caps=-all "$@"

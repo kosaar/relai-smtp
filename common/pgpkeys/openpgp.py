@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from email.utils import parseaddr
 
-GPG = os.environ.get("KEYDIR_GPG", "gpg")
+GPG = os.environ.get("PGP_GPG", "gpg")
 BASE_ARGS = ["--batch", "--no-tty", "--quiet", "--no-greeting", "--no-autostart",
              "--no-permission-warning", "--with-colons", "--fixed-list-mode"]
 
@@ -53,7 +53,7 @@ class KeyInfo:
 
 @contextmanager
 def temp_home():
-    tmp = os.environ.get("KEYDIR_TMP") or None
+    tmp = os.environ.get("PGP_TMPDIR") or None
     home = tempfile.mkdtemp(prefix="gnupg-", dir=tmp)
     os.chmod(home, 0o700)
     try:

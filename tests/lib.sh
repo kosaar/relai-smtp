@@ -54,9 +54,24 @@ submit() {
         --header "Subject: ${subj}" --body "Test ${subj}" "$@"
 }
 
+# --- Clés des destinataires ---------------------------------------------------------
+# provision_key <adresse> : le poste génère sa paire de clés (RNP), la dépose sur
+# l'annuaire en HTTPS, puis l'administrateur la valide (empreinte du poste).
+provision_key() {
+    local email=$1 fpr out
+    fpr=$(dc exec -T workstation keys gen "$email") || return 1
+    out=$(dc exec -T workstation bash -c "keys export ${email} | keys deposit ${email}") || return 1
+    [[ $out == *HTTP_CODE=202* ]] || { echo "$out" >&2; return 1; }
+    dc exec -T keydir keydir-admin approve "$email" "$fpr" >/dev/null
+}
+
 # --- BAL du fournisseur, relevées en IMAPS depuis le poste de travail ------------
+# Le motif est cherché dans le message brut puis dans sa partie déchiffrée (RNP,
+# trousseaux du poste pour cette adresse).
 # mb_fetch <bal> <motif> [attente_s] : message brut contenant <motif> (code 1 si absent).
 mb_fetch() { dc exec -T workstation mailbox fetch "$1" --match "$2" --wait "${3:-0}"; }
+# mb_plain <bal> <motif> [attente_s] : partie déchiffrée du message contenant <motif>.
+mb_plain() { dc exec -T workstation mailbox fetch "$1" --match "$2" --wait "${3:-0}" --decrypted; }
 mb_has()   { mb_fetch "$1" "$2" "${3:-0}" >/dev/null; }
 mb_count() { dc exec -T workstation mailbox count "$1" ${2:+--match "$2"}; }
 # Partie en-têtes d'un message brut (stdin), CR retirés.

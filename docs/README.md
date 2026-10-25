@@ -7,15 +7,19 @@ Jenkins, GLPI, YouTrack…). Chaque application :
 - s'authentifie avec **son propre identifiant** (SASL) ;
 - n'envoie que depuis **ses IP** déclarées et avec **son adresse** expéditrice.
 
-Les messages sont contrôlés par une passerelle (milter) **avant** d'être mis en
-file, puis transmis au MTA d'un fournisseur cloud (AWS SES, SendGrid, Mailjet,
-Brevo…) en **TLS ≥ 1.2 vérifié avec authentification SASL**.
+Les messages sont contrôlés puis **chiffrés en OpenPGP pour leurs
+destinataires** par une passerelle (milter) **avant** d'être mis en file : rien
+n'est jamais écrit ni transmis en clair. Un destinataire sans clé validée dans
+l'annuaire est refusé. Les messages chiffrés sont transmis au MTA d'un
+fournisseur cloud (AWS SES, SendGrid, Mailjet, Brevo…) en **TLS ≥ 1.2 vérifié
+avec authentification SASL**, et lus dans Thunderbird avec la clé privée du
+destinataire.
 
 ```
-GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Postfix ──587/465 TLS + SASL──▶ fournisseur cloud
-                                                              │  ▲
-                                                     milter   ▼  │  (avant mise en file)
-                                                           passerelle
+GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Postfix ──587/465 TLS + SASL──▶ fournisseur ──▶ BAL ──IMAPS──▶ Thunderbird
+                                                              │  ▲                                                       (clé privée)
+                                                     milter   ▼  │  (avant mise en file : message chiffré)
+                                                           passerelle ──HTTPS (WKD)──▶ annuaire de clés ◀──HTTPS (dépôt)── Thunderbird
 ```
 
 > **Version 2 (en cours) :** le relai évolue vers un relai **chiffrant** (OpenPGP,
@@ -91,11 +95,11 @@ pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_T
 | Image | Paquets Ubuntu | Rôle |
 |-------|----------------|------|
 | `relay` | `postfix`, `libsasl2-modules` (PLAIN/LOGIN), `libsasl2-modules-db` et `sasl2-bin` (base SASL des applications), `python3` (`relay-config`), `ca-certificates` | relai de production |
-| `gateway` | `python3`, `python3-milter` | passerelle de production (milter), exécutée sous un utilisateur non privilégié |
+| `gateway` | `python3`, `python3-milter`, `gpg` (chiffrement, clés publiques seulement), `ca-certificates` | passerelle de production (milter), exécutée sous un utilisateur non privilégié |
 | `keydir` | `python3` (serveur HTTPS, SQLite), `gpg` (lecture des clés publiques) | annuaire de clés de production, exécuté sous un utilisateur non privilégié |
 | `test/provider` | `postfix`, `sasl2-bin`, `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
 | `test/workstation` | `rnp`, `gnupg`, `gpg-wks-client`, `curl`, `openssl`, `python3` | simule le poste d'un destinataire (rôle de Thunderbird) : outils `mailbox` (IMAPS) et `keys` (clés RNP, annuaire) |
-| `test/client` | `swaks`, `libnet-ssleay-perl`, `libauthen-sasl-perl`, `openssl`, `python3` | simule une application (déclarée ou non) |
+| `test/client` | `swaks`, `libnet-ssleay-perl`, `libauthen-sasl-perl`, `openssl`, `python3` | simule une application (déclarée ou non) ; outil `mkmsg` (messages MIME avec pièces jointes binaires et manifeste SHA-256) |
 
 Bonnes pratiques appliquées dans les Dockerfiles :
 
@@ -123,22 +127,50 @@ Bonnes pratiques appliquées dans les Dockerfiles :
 ### Passerelle (`gateway/`)
 
 Postfix appelle la passerelle (`smtpd_milters = inet:gateway:9900`) pour chaque
-message, **avant** de répondre `250 queued`. Elle lit l'inventaire et vérifie :
+message, **avant** de répondre `250 queued`. Elle lit l'inventaire et :
 
 | Étape | Contrôle | Refus |
 |-------|----------|-------|
 | `MAIL FROM` | login SASL connu (`{auth_authen}`) | `550 5.7.1` |
 | `MAIL FROM` | IP du client déclarée pour **ce** login (`client_ips`) | `550 5.7.1` (`client-ip-mismatch`) |
 | `MAIL FROM` | enveloppe = adresse du login, expéditeur nul refusé | `553 5.7.1` / `550 5.7.1` |
+| `RCPT TO` | clé OpenPGP **valide** du destinataire, lue dans le WKD de l'annuaire (HTTPS vérifié, cache `GATEWAY_KEY_CACHE_TTL`) : ni absente, ni expirée, ni révoquée, avec une sous-clé de chiffrement | `550 5.7.1 No valid OpenPGP key` **pour ce destinataire** (`no-key`, `key-expired`, `key-revoked`, `key-unusable`) ; annuaire injoignable : `451 4.7.1` |
 | fin du message | un seul en-tête `From:`, une seule adresse, égale à celle du login ; le nom affiché ne contient pas une autre adresse | `550 5.7.1` (`from-mismatch`, `from-multiple`, `from-invalid`, `from-display-spoof`) |
+| fin du message | **chiffrement** PGP/MIME pour tous les destinataires acceptés (voir ci-dessous) | erreur interne : `451 4.7.1` |
 
-Si la passerelle est arrêtée ou en erreur, Postfix répond `451` (erreur
-temporaire, l'application réessaie) : `milter_default_action = tempfail`.
-Les journaux de la passerelle ne contiennent que des métadonnées
-(identifiant de file, IP, login, motif), jamais le contenu ni les en-têtes.
+Le message est remplacé **avant** la mise en file : la file de Postfix ne
+contient que du chiffré (`postcat` ne montre ni l'objet ni le corps). Chaque
+refus est un échec fermé : jamais d'envoi en clair, jamais d'entrée de cache
+expirée réutilisée quand l'annuaire est injoignable. Si la passerelle est
+arrêtée, Postfix répond par une erreur temporaire (`454 4.3.0`,
+`milter_default_action = tempfail`) et l'application réessaie. Les journaux de
+la passerelle ne contiennent que des métadonnées (identifiant de file, IP,
+login, destinataire, motif, tailles), jamais le contenu ni les en-têtes.
 
-Les lots suivants y ajoutent les quotas, le contrôle du contenu et le
-chiffrement OpenPGP.
+**Format chiffré** (PGP/MIME, RFC 3156, lu par Thunderbird) :
+
+```
+Subject: Message chiffré                      <- objet extérieur neutre (GATEWAY_NEUTRAL_SUBJECT)
+Content-Type: multipart/encrypted; protocol="application/pgp-encrypted"
+  ├─ application/pgp-encrypted                (Version: 1)
+  └─ application/octet-stream (encrypted.asc) <- message OpenPGP (GnuPG)
+       └─ multipart/mixed; protected-headers="v1"
+            Subject / From / To / Cc / Date / Message-ID…   <- en-têtes protégés (objet réel)
+            └─ entité MIME d'origine, intacte (texte, pièces jointes)
+```
+
+- un seul message chiffré par transaction, pour tous ses destinataires ;
+- identifiants de clés **masqués** (`--throw-keyids`) quand il n'y a qu'un
+  destinataire ; **visibles** quand il y en a plusieurs, car RNP (la
+  bibliothèque OpenPGP de Thunderbird) n'essaie que le premier destinataire
+  masqué : chaque destinataire voit alors l'identifiant des sous-clés des
+  autres, y compris d'un destinataire en copie cachée ;
+- la limite annoncée aux applications reste `MESSAGE_SIZE_LIMIT` ; le chiffré
+  peut atteindre 1,5 × cette taille en file (armure ASCII) : la limite du
+  fournisseur doit le permettre.
+
+Les lots suivants y ajoutent le nettoyage des en-têtes extérieurs, les quotas
+et le contrôle du contenu.
 
 ### Annuaire de clés (`keydir/`)
 
@@ -254,6 +286,9 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 | `RELAY_INET_PROTOCOLS` | `ipv4`, `ipv6` ou `all` | `ipv4` | non |
 | `TZ` | fuseau horaire des logs | `UTC` | non |
 | `RELAY_IMAGE_TAG` | tag des images construites | `2.0.0` | non |
+| `GATEWAY_KEYDIR_CA_FILE` | autorité(s) de confiance pour le certificat de l'annuaire, vue de la passerelle | `/etc/ssl/certs/ca-certificates.crt` | non |
+| `GATEWAY_KEY_CACHE_TTL` | durée de cache des clés (et des absences de clé) dans la passerelle, en secondes ; délai maximal de prise en compte d'une révocation | `300` | non |
+| `GATEWAY_NEUTRAL_SUBJECT` | objet extérieur des messages chiffrés | `Message chiffré` | non |
 | `KEYDIR_BIND_ADDRESS` | IP **privée** de l'hôte sur laquelle publier l'annuaire (compose) | — | **oui** |
 | `KEYDIR_PUBLISHED_PORT` | port HTTPS publié sur l'hôte | `443` | non |
 | `KEYDIR_DOMAINS` | domaines dont l'annuaire publie les clés (séparés par des espaces) | — | **oui** |
@@ -457,7 +492,10 @@ paramètres de test.
 
 À chaque exécution, il génère dans `tests/.work/` (ignoré par git) des mots de
 passe aléatoires (fournisseur, BAL, un par application) et une copie de
-l'inventaire de test `tests/fixtures/applications.toml`. Le service one-shot
+l'inventaire de test `tests/fixtures/applications.toml`. Une fois la stack
+démarrée, le poste génère les paires de clés d'alice@, bob@ et
+ext@partner.test (RNP), les dépose sur l'annuaire, et l'administrateur les
+valide ; carol@ reste volontairement sans clé. Le service one-shot
 `pki` génère une AC de test et les certificats `provider`, `smtp-relay` et
 `keydir` dans le volume `test-pki`. Aucun composant n'est simulé par un mock :
 les messages sont soumis en STARTTLS (certificat vérifié) par swaks, livrés
@@ -474,7 +512,7 @@ vérifié) depuis le poste de travail.
 | `gateway` | 10.0.3.20:9900 | passerelle (milter) |
 | `keydir` | 10.0.2.30:8443 (alias `openpgpkey.example.com`) / 10.0.3.30 | annuaire de clés (HTTPS, WKD), domaines `example.com` et `partner.test` |
 | `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
-| `workstation` | 10.0.2.50 | poste destinataire : relève les BAL en IMAPS (outil `mailbox`), génère ses clés avec RNP et les dépose sur l'annuaire (outil `keys`) |
+| `workstation` | 10.0.2.50 | poste destinataire : génère ses clés avec RNP et les dépose sur l'annuaire (outil `keys`), relève les BAL en IMAPS et déchiffre avec RNP (outils `mailbox`, `pgpmime`) |
 
 Les réseaux Docker de test (`private`, `internet`, `backend`) sont `internal`,
 sans accès à Internet.
@@ -506,6 +544,18 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 | IT2.5 | certificat de révocation (RNP) appliqué immédiatement, clé servie marquée révoquée ; certificat d'une autre clé refusé |
 | IT2.6 | HTTP en clair sans réponse (et journalisé), TLS 1.1 refusé, TLS 1.2 et 1.3 acceptés (certificat vérifié) |
 | IT2.7 | état conservé après redémarrage ; journal d'audit sans contenu de clé |
+| IT3.1 | **E2E** GitLab → alice : message brut `multipart/encrypted`, objet neutre, aucun fragment de l'objet, du corps ni des pièces jointes ; déchiffré par RNP : en-têtes protégés v1, objet, texte et pièces jointes identiques (SHA-256) |
+| IT3.2 | la clé de bob ne déchiffre pas le message d'alice |
+| IT3.3 | carol (sans clé) : `550 5.7.1` au `RCPT TO`, rien en file ni en BAL |
+| IT3.4 | alice + carol : carol refusée, alice livrée chiffrée |
+| IT3.5 | alice + bob : un seul message, déchiffrable par chacun ; identifiants de clés masqués pour un destinataire unique, visibles à plusieurs |
+| IT3.6 | clé révoquée (certificat déposé) ou expirée : refusée après expiration du cache ; nouvelle clé validée : envoi de nouveau possible |
+| IT3.7 | passerelle arrêtée : erreur temporaire, rien de livré ; relancée : le renvoi réussit |
+| IT3.8 | annuaire arrêté, cache expiré : `451 4.7.1`, rien de livré |
+| IT3.9 | après rotation, seul le nouveau trousseau déchiffre |
+| IT3.10 | destinataire externe avec clé validée : livré chiffré ; sans clé : refusé |
+| IT3.11 | fournisseur arrêté : le message en file (`postcat`) ne contient que du chiffré ; livré après relance |
+| IT3.12 | objet UTF-8 (RFC 2047), pièces jointes binaires (dont vide), message proche de la taille maximale : aller-retour exact |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -523,6 +573,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 ## 9. Points de sécurité
 
 - **Pas d'open relay.** Relayer exige une authentification SASL ; aucun domaine local n'existe ; un inventaire vide ou invalide empêche le démarrage.
+- **Chiffrement de bout en bout** : le message est chiffré pour ses destinataires avant la mise en file ; ni la file, ni le fournisseur, ni la BAL ne voient le contenu ou l'objet réel. Destinataire sans clé validée : refus, jamais d'envoi en clair.
 - **Trois verrous par application** : son mot de passe, ses IP (liste blanche globale dès la connexion, puis liaison login ↔ IP dans la passerelle) et son adresse (enveloppe dans Postfix, `From:` dans la passerelle). Un identifiant volé ne sert ni depuis une autre machine, ni pour usurper une autre application.
 - **Aucun mot de passe en clair** : STARTTLS obligatoire avant AUTH, TLS ≥ 1.2. Essais limités par IP (`RELAY_AUTH_RATE_LIMIT`).
 - **L'IP source doit être la vraie.** Le filtrage repose sur l'IP vue par Postfix.
@@ -547,7 +598,10 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 | `553 5.7.1 … not owned by user …` | L'application utilise une autre adresse que celle de l'inventaire (`MAIL FROM`). |
 | `550 5.7.1 From: header must be …` | L'en-tête `From:` diffère de l'adresse de l'inventaire. |
 | `550 5.7.1 This login is not allowed from this host` | Le login est utilisé depuis l'IP d'une autre application. |
-| `451 4.7.1` ou `4.3.5` à la fin du message | Passerelle arrêtée ou injoignable : `docker compose ps gateway`, `docker compose logs gateway`. |
+| `454 4.3.0 Try again later` | Passerelle arrêtée ou injoignable : `docker compose ps gateway`, `docker compose logs gateway`. |
+| `550 5.7.1 No valid OpenPGP key for <adresse>` | Le destinataire n'a pas de clé validée dans l'annuaire (ou elle est expirée, révoquée) : `docker compose exec keydir keydir-admin show <adresse>` ; le motif exact est dans les logs de la passerelle (`reason=`). |
+| `451 4.7.1 Key directory unavailable` | La passerelle ne joint pas l'annuaire (arrêté, certificat non reconnu : `GATEWAY_KEYDIR_CA_FILE`). |
+| Le destinataire ne peut pas déchiffrer dans Thunderbird | Sa clé privée ne correspond pas à la clé validée (rotation non faite côté annuaire) : comparer les empreintes. |
 | `status=deferred … SASL authentication failed` | Identifiants du fournisseur erronés ou expirés. Vérifiez les secrets, puis `docker compose up -d` et `docker compose exec relay postqueue -f`. |
 | `Server certificate not verified` | Nom de `RELAY_HOST` différent de celui du certificat du fournisseur, ou autorité absente du bundle (`RELAY_TLS_CA_FILE`). |
 | `connect to …:587: Connection timed out` | Sortie bloquée par un pare-feu, ou DNS. Testez depuis l'hôte avec `nc -vz <RELAY_HOST> 587`. |

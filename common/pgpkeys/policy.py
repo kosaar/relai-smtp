@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from keydir.openpgp import KeyInfo, SubKey
+from pgpkeys.openpgp import KeyInfo, SubKey
 
 EMAIL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 RSA_ALGOS = {1, 2, 3}

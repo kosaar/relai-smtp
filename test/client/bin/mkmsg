@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Fabrique un message MIME de test (rôle d'une application) — TEST UNIQUEMENT.
+
+  mkmsg --from A --to B[,C] --subject S --text T [--attach NOM:TAILLE]...
+        [--header 'Nom: valeur']... --out message.eml --manifest manifeste.json
+
+Les pièces jointes sont des octets aléatoires (application/octet-stream,
+base64). Le manifeste JSON décrit ce que le destinataire doit retrouver après
+déchiffrement : objet, texte, SHA-256 et taille de chaque pièce jointe.
+"""
+import argparse
+import hashlib
+import json
+import os
+import sys
+from email.message import EmailMessage
+from email.policy import SMTP
+from email.utils import formatdate, make_msgid
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--from", dest="sender", required=True)
+    p.add_argument("--to", required=True)
+    p.add_argument("--cc")
+    p.add_argument("--subject", required=True)
+    p.add_argument("--text", required=True)
+    p.add_argument("--attach", action="append", default=[], help="NOM:TAILLE (octets aléatoires)")
+    p.add_argument("--header", action="append", default=[])
+    p.add_argument("--out", required=True)
+    p.add_argument("--manifest", required=True)
+    a = p.parse_args()
+
+    msg = EmailMessage(policy=SMTP)
+    msg["From"] = a.sender
+    msg["To"] = a.to
+    if a.cc:
+        msg["Cc"] = a.cc
+    msg["Subject"] = a.subject
+    msg["Date"] = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid(domain=a.sender.rpartition("@")[2])
+    for h in a.header:
+        name, _, value = h.partition(":")
+        msg[name.strip()] = value.strip()
+    msg.set_content(a.text, charset="utf-8")
+    attachments = []
+    for spec in a.attach:
+        name, _, size = spec.rpartition(":")
+        data = os.urandom(int(size))
+        msg.add_attachment(data, maintype="application", subtype="octet-stream", filename=name)
+        attachments.append({"name": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
+    raw = msg.as_bytes()
+    with open(a.out, "wb") as f:
+        f.write(raw)
+    with open(a.manifest, "w") as f:
+        json.dump({"subject": a.subject, "text": a.text, "message_id": msg["Message-ID"],
+                   "attachments": attachments, "size": len(raw)}, f, ensure_ascii=False)
+    print(len(raw))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

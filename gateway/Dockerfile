@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # Passerelle du relai SMTP : milter Python appelé par Postfix AVANT la mise en
-# file (identité de l'application ; quotas, contrôle du contenu et chiffrement
-# OpenPGP dans les lots suivants). Contexte de construction : racine du dépôt.
+# file : identité de l'application, clé OpenPGP de chaque destinataire (WKD de
+# l'annuaire), chiffrement PGP/MIME. Contexte de construction : racine du dépôt.
 ARG UBUNTU_TAG=resolute-20260927
 FROM ubuntu:${UBUNTU_TAG}
 ARG UBUNTU_TAG
@@ -17,17 +17,18 @@ LABEL org.opencontainers.image.title="smtp-relay-gateway" \
 ARG DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends python3 python3-milter; \
+    apt-get install -y --no-install-recommends python3 python3-milter gpg ca-certificates; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/log/apt /var/log/dpkg.log; \
     useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin gateway; \
     mkdir -p /opt/relay/lib
 
 COPY common/relaycfg/ /opt/relay/lib/relaycfg/
+COPY common/pgpkeys/ /opt/relay/lib/pgpkeys/
 COPY gateway/relaygw/ /opt/relay/lib/relaygw/
 COPY --chmod=0755 gateway/bin/relay-gateway /usr/local/bin/relay-gateway
 COPY --chmod=0755 gateway/bin/gateway-healthcheck /usr/local/bin/gateway-healthcheck
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PGP_TMPDIR=/tmp
 USER gateway
 EXPOSE 9900
 

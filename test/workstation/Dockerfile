@@ -23,6 +23,7 @@ RUN set -eux; \
     useradd --create-home --shell /bin/bash user
 
 COPY --chmod=0755 bin/ /usr/local/bin/
+COPY lib/ /usr/local/lib/workstation/
 
 USER user
 WORKDIR /home/user

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Analyse d'un message PGP/MIME reçu (stdin) — TEST UNIQUEMENT.
+
+  pgpmime decrypt --mailbox <adresse> | --home <trousseau RNP>
+        partie déchiffrée (MIME interne) sur stdout ; code 1 si indéchiffrable
+  pgpmime summary [--mailbox <adresse> | --home <trousseau>]
+        résumé JSON : structure extérieure, identifiants de clés des paquets,
+        en-têtes protégés, objet réel, texte, pièces jointes (SHA-256)
+"""
+import argparse
+import json
+import sys
+
+sys.path.insert(0, "/usr/local/lib/workstation")
+import wsmail  # noqa: E402
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("cmd", choices=["decrypt", "summary"])
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--mailbox", help="tous les trousseaux de l'adresse (courant + archives)")
+    g.add_argument("--home", help="un trousseau RNP précis")
+    a = p.parse_args()
+    raw = sys.stdin.buffer.read()
+    homes = [a.home] if a.home else wsmail.homes_for(a.mailbox) if a.mailbox else []
+    if a.cmd == "decrypt":
+        plain, _ = wsmail.decrypt(raw, homes)
+        if plain is None:
+            print("pgpmime: message indéchiffrable avec " + (", ".join(homes) or "aucun trousseau"), file=sys.stderr)
+            return 1
+        sys.stdout.buffer.write(plain)
+        return 0
+    print(json.dumps(wsmail.summarize(raw, homes), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

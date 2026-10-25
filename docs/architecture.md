@@ -1,10 +1,10 @@
 # Architecture du relai SMTP
 
-> État actuel : lots 1 et 2 du [plan d'implémentation](plan-implementation.md)
-> (soumission 587 authentifiée, identité par application, passerelle milter,
-> annuaire de clés). Les lots suivants ajoutent le chiffrement OpenPGP (la
-> passerelle interrogera alors l'annuaire), les quotas, le contrôle du contenu
-> et la supervision.
+> État actuel : lots 1 à 3 du [plan d'implémentation](plan-implementation.md)
+> (soumission 587 authentifiée, identité par application, annuaire de clés,
+> chiffrement OpenPGP dans la passerelle avant la mise en file). Les lots
+> suivants ajoutent le nettoyage des en-têtes, les quotas, le contrôle du
+> contenu et la supervision.
 
 ## Vue d'ensemble
 
@@ -29,7 +29,7 @@ flowchart LR
             SMTPD --> ACL --> Q --> SMTP
             INV -. "relay-config<br/>(au démarrage)" .-> ACL
         end
-        GW["Conteneur gateway<br/>milter Python :9900<br/>login ↔ IP ↔ From:"]
+        GW["Conteneur gateway<br/>milter Python :9900<br/>login ↔ IP ↔ From:<br/>clé du destinataire (WKD)<br/>chiffrement PGP/MIME"]
         KD["Conteneur keydir<br/>HTTPS :8443 (TLS ≥ 1.2)<br/>dépôt · validation admin<br/>WKD · révocations · audit"]
     end
 
@@ -44,7 +44,7 @@ flowchart LR
     ACL <-- "milter, avant la mise en file<br/>(réseau backend interne)" --> GW
     SMTP == "587/465 TLS ≥ 1.2 vérifié<br/>AUTH SASL" ==> MTA
     TB -- "HTTPS : dépôt de clé,<br/>WKD (openpgpkey.example.com)" --> KD
-    GW -. "WKD (lot 3)" .-> KD
+    GW -- "HTTPS : WKD (cache)" --> KD
 
     classDef deny fill:#fde2e2,stroke:#c0392b,color:#7b1d1d;
     classDef ok fill:#e3f4e8,stroke:#2e8b57,color:#1b4d2e;
@@ -64,7 +64,8 @@ que sur le port 587 et n'est pas joignable depuis Internet.
 |---|----------------------|------|-------------|------------------|-----------|
 | 1 | Application déclarée → relai | 587/tcp | **STARTTLS obligatoire**, TLS ≥ 1.2, certificat `smtp-relay` | **SASL** PLAIN/LOGIN, un identifiant par application, après STARTTLS uniquement | IP dans l'inventaire ; login ↔ IP ; `MAIL FROM` et `From:` = adresse du login |
 | 2 | Hôte non déclaré → relai | 587/tcp | — | — | **refus** `554 5.7.1` dès la connexion + log |
-| 3 | Relai ↔ passerelle | 9900/tcp (réseau `backend` interne) | — (réseau Docker interne) | — | `milter_default_action = tempfail` : passerelle absente ⇒ `451` |
+| 3 | Relai ↔ passerelle | 9900/tcp (réseau `backend` interne) | — (réseau Docker interne) | — | `milter_default_action = tempfail` : passerelle absente ⇒ erreur temporaire |
+| 3b | Passerelle → annuaire | 8443/tcp (réseau `backend` interne) | HTTPS, TLS ≥ 1.2, certificat vérifié | — | WKD ; annuaire injoignable ⇒ `451 4.7.1` (échec fermé) |
 | 4 | Relai → smarthost | 587/tcp (STARTTLS) ou 465/tcp | **TLS ≥ 1.2**, certificat vérifié (`secure`) | **SASL** (secrets) | `smtp_tls_security_level` |
 | 5 | Poste → annuaire | 443/tcp (8443 dans le conteneur) | **HTTPS**, TLS ≥ 1.2, aucun port en clair | aucune (dépôt public) | clé publiée seulement après validation de l'empreinte par un administrateur ; révocation par certificat signé |
 
@@ -92,14 +93,18 @@ sequenceDiagram
     Note over S: sender_login_maps : sinon 553 5.7.1 not owned by user
     S->>G: MAIL FROM + {auth_authen}
     Note over G: login connu, IP liée au login, enveloppe = adresse
-    App->>S: RCPT TO / DATA
-    S->>G: en-têtes + fin du message
+    App->>S: RCPT TO:<alice@example.com>
+    S->>G: RCPT
+    Note over G: clé d'alice : WKD de l'annuaire (cache)<br/>absente / expirée / révoquée ⇒ 550 5.7.1 pour ce destinataire<br/>annuaire injoignable ⇒ 451 4.7.1
+    App->>S: DATA
+    S->>G: en-têtes + corps
     alt From: ≠ gitlab@example.com
         G-->>S: 550 5.7.1 (log : motif seulement)
         S-->>App: 550 5.7.1
     else conforme
-        G-->>S: accept
-        S->>Q: 250 queued
+        Note over G: chiffrement PGP/MIME pour les destinataires acceptés<br/>(en-têtes protégés, objet extérieur neutre)
+        G-->>S: en-têtes et corps remplacés
+        S->>Q: 250 queued (file : chiffré uniquement)
         Q->>M: STARTTLS vérifié + AUTH
         M-->>Q: 250 → status=sent (sinon deferred, message conservé)
     end

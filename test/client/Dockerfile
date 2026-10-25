@@ -21,5 +21,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb; \
     useradd --system --create-home --shell /usr/sbin/nologin app
 
+COPY --chmod=0755 bin/ /usr/local/bin/
+
 USER app
+WORKDIR /home/app
 CMD ["sleep", "infinity"]

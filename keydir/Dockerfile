@@ -24,6 +24,7 @@ RUN set -eux; \
     install -d -o keydir -g keydir -m 0700 /var/lib/keydir; \
     mkdir -p /opt/keydir/lib
 
+COPY common/pgpkeys/ /opt/keydir/lib/pgpkeys/
 COPY keydir/keydir/ /opt/keydir/lib/keydir/
 COPY --chmod=0755 keydir/bin/keydir-server keydir/bin/keydir-admin keydir/bin/keydir-healthcheck /usr/local/bin/
 COPY --chmod=0755 keydir/entrypoint.sh /usr/local/bin/keydir-entrypoint

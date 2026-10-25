@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 from tests.unit import ROOT  # noqa: F401  (chemins d'import)
-from keydir import openpgp, policy, wkd
-from keydir.openpgp import KeyInfo, SubKey
+from pgpkeys import openpgp, policy, wkd
+from pgpkeys.openpgp import KeyInfo, SubKey
 
 NOW = int(time.time())
 YEAR = 365 * 86400

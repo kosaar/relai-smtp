@@ -10,6 +10,8 @@
 #  keys fpr <adresse>            empreinte de la clé courante (selon RNP)
 #  keys export <adresse>         clé publique (armure ASCII, RNP)
 #  keys revcert <adresse>        certificat de révocation (RNP)
+#  keys gen-gpg <adresse> <exp.> paire GnuPG expirant bientôt (ex. seconds=30) ; affiche l'empreinte
+#  keys export-gpg <adresse>     clé publique de cette paire GnuPG
 #  keys bad <cas> <adresse>      clé publique invalide générée par GnuPG :
 #                                nosub (sans sous-clé de chiffrement), expired, rsa1024
 #  keys deposit <adresse> [fichier]  dépôt (stdin par défaut) ; dernière ligne : HTTP_CODE=<code>
@@ -67,6 +69,13 @@ case $cmd in
     fpr)     rnp_fpr "$1" ;;
     export)  rnpkeys --homedir "$(home_of "$1")" --export-key "$1" ;;
     revcert) rnpkeys --homedir "$(home_of "$1")" --export-rev "$1" --password '' ;;
+    gen-gpg)
+        [[ $# -eq 2 ]] || die "usage : keys gen-gpg <adresse> <expiration>"
+        h="$HOME/.gnupg-keys/$1"; rm -rf "$h"; mkdir -p "$h"; chmod 700 "$h"
+        gpg --homedir "$h" --batch --no-tty --quiet --pinentry-mode loopback --passphrase '' \
+            --quick-gen-key "$1" default default "$2" 2>/dev/null || die "génération GnuPG impossible"
+        gpg --homedir "$h" --batch --with-colons --list-keys "$1" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}' ;;
+    export-gpg) gpg --homedir "$HOME/.gnupg-keys/$1" --batch --armor --export "$1" ;;
     bad)
         [[ $# -eq 2 ]] || die "usage : keys bad <nosub|expired|rsa1024> <adresse>"
         h=$(mktemp -d); chmod 700 "$h"

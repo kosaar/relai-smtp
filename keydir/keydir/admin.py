@@ -16,7 +16,7 @@ import pwd
 import sys
 import time
 
-from keydir import policy
+from pgpkeys import policy
 from keydir.store import Store, StoreError
 
 

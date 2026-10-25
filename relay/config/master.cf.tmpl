@@ -2,11 +2,15 @@
 #  master.cf — GÉNÉRÉ AU DÉMARRAGE par entrypoint.sh (master.cf.tmpl).
 #  Seul le port de soumission 587 est ouvert (pas de port 25). Pas de chroot
 #  (inutile dans un conteneur isolé, et source de pannes DNS/TLS).
+#  cleanup accepte un message 50 % plus gros que la limite annoncée aux
+#  applications (SIZE, contrôlée par smtpd) : la version chiffrée produite par
+#  la passerelle (armure ASCII) est plus volumineuse que l'original.
 # =============================================================================
 # service     type  private unpriv  chroot  wakeup  maxproc command + args
 submission inet  n       -       n       -       -       smtpd
 pickup        unix  n       -       n       60      1       pickup
 cleanup       unix  n       -       n       -       0       cleanup
+  -o message_size_limit=@@QUEUE_SIZE_LIMIT@@
 qmgr          unix  n       -       n       300     1       qmgr
 tlsmgr        unix  -       -       n       1000?   1       tlsmgr
 rewrite       unix  -       -       n       -       -       trivial-rewrite

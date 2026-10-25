@@ -16,7 +16,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from keydir import openpgp, wkd
+from pgpkeys import openpgp, wkd
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS keys (
