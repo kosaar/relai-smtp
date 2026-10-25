@@ -114,6 +114,8 @@ services:
     restart: unless-stopped
     environment:
       GATEWAY_INVENTORY_FILE: /etc/relay/applications.toml
+      # Règles de contrôle du contenu (versionnées dans config/).
+      GATEWAY_CONTENT_RULES_FILE: /etc/relay/content-rules.toml
       # Annuaire de clés (WKD) : HTTPS vérifié par l'AC indiquée.
       GATEWAY_KEYDIR_URL: https://keydir:8443
       GATEWAY_KEYDIR_CA_FILE: ${GATEWAY_KEYDIR_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}

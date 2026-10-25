@@ -10,6 +10,7 @@ l'application.
 
 En fin de DATA :
   - From: = adresse de l'application (enveloppe), IP cliente (XFORWARD) déclarée ;
+  - contrôle du contenu décodé (relaygw.content) : 550 5.7.1 + identifiant de règle ;
   - chiffrement PGP/MIME pour tous les destinataires (en-têtes protégés) ;
   - en-têtes extérieurs en liste blanche (D9) : objet neutre, identifiants de
     message pseudonymisés (HMAC), le reste n'existe plus que chiffré.
@@ -26,7 +27,7 @@ import time
 from dataclasses import dataclass
 
 from pgpkeys import openpgp
-from relaygw import crypto, pgpmime, policy
+from relaygw import content, crypto, pgpmime, policy
 
 log = logging.getLogger("gateway")
 MAX_LINE = 4096
@@ -39,6 +40,7 @@ class Context:
     inventory: object
     config: object
     resolver: object
+    rules: object = None   # relaygw.content.Rules ; None = aucun contrôle (tests unitaires)
 
 
 CTX: Context | None = None
@@ -169,6 +171,11 @@ class Session(socketserver.StreamRequestHandler):
         refusal = policy.check_from_headers(app, from_values)
         if refusal:
             return self._refuse(refusal, app)
+        if CTX.rules is not None:
+            rule = content.scan(CTX.rules, data)
+            if rule:
+                return self._refuse(policy.Refusal("550", "5.7.1", f"Message blocked by content policy (rule {rule})",
+                                                   f"content:{rule}"), app)
         try:
             return self._encrypt_and_reinject(app, headers, body)
         except Reply as r:

@@ -1,10 +1,10 @@
 # Architecture du relai SMTP
 
-> État actuel : lots 1 à 4 du [plan d'implémentation](plan-implementation.md)
+> État actuel : lots 1 à 4 et 6 du [plan d'implémentation](plan-implementation.md)
 > (soumission 587 authentifiée, identité par application, annuaire de clés,
 > chiffrement OpenPGP dans la passerelle avant la mise en file, nettoyage des
-> en-têtes). Les lots suivants ajoutent les quotas, le contrôle du contenu et
-> la supervision.
+> en-têtes, contrôle du contenu). Les quotas (lot 5) ne sont pas réalisés ;
+> les lots suivants ajoutent la supervision.
 
 ## Vue d'ensemble
 
@@ -31,7 +31,7 @@ flowchart LR
             RI --> Q --> SMTP
             INV -. "relay-config<br/>(au démarrage)" .-> ACL
         end
-        GW["Conteneur gateway (Python)<br/>milter :9900 : login ↔ IP, clé du destinataire (WKD)<br/>filtre avant file :10025 : From:, chiffrement PGP/MIME,<br/>en-têtes en liste blanche, Message-ID pseudonymisés"]
+        GW["Conteneur gateway (Python)<br/>milter :9900 : login ↔ IP, clé du destinataire (WKD)<br/>filtre avant file :10025 : From:, contrôle du contenu, chiffrement PGP/MIME,<br/>en-têtes en liste blanche, Message-ID pseudonymisés"]
         KD["Conteneur keydir<br/>HTTPS :8443 (TLS ≥ 1.2)<br/>dépôt · validation admin<br/>WKD · révocations · audit"]
     end
 
@@ -102,8 +102,8 @@ sequenceDiagram
     Note over G: clé d'alice : WKD de l'annuaire (cache)<br/>absente / expirée / révoquée ⇒ 550 5.7.1 pour ce destinataire<br/>annuaire injoignable ⇒ 451 4.7.1
     App->>S: DATA
     S->>G: transaction relayée en temps réel (filtre avant file :10025, rien n'est écrit)
-    alt From: ≠ gitlab@example.com
-        G-->>S: 550 5.7.1 (log : motif seulement)
+    alt From: ≠ gitlab@example.com, ou contenu interdit (clé privée, jeton, .exe)
+        G-->>S: 550 5.7.1 (log : motif / identifiant de règle seulement)
         S-->>App: 550 5.7.1
     else conforme
         Note over G: chiffrement PGP/MIME pour les destinataires acceptés<br/>(en-têtes protégés, objet neutre, en-têtes extérieurs<br/>en liste blanche, Message-ID pseudonymisés)

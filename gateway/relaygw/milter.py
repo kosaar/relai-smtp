@@ -20,7 +20,7 @@ import Milter
 
 from relaycfg import inventory as inv_mod
 from relaygw import config as config_mod
-from relaygw import policy, proxy
+from relaygw import content, policy, proxy
 from relaygw.keys import KeyResolver
 
 log = logging.getLogger("gateway")
@@ -88,6 +88,12 @@ def main() -> int:
         INVENTORY = inv_mod.load(path)
     except inv_mod.InventoryError as e:
         errors += e.errors
+    rules_path = os.environ.get("GATEWAY_CONTENT_RULES_FILE", "/etc/relay/content-rules.toml")
+    rules = None
+    try:
+        rules = content.load(rules_path)
+    except content.RulesError as e:
+        errors += e.errors
     if errors:
         for err in errors:
             log.error("FATAL: %s", err)
@@ -98,7 +104,9 @@ def main() -> int:
              ", ".join(INVENTORY.applications), INVENTORY.sender_domain)
     log.info("annuaire %s (cache %d s), objet extérieur « %s »", config.keydir_url, config.key_cache_ttl,
              config.neutral_subject)
-    proxy.CTX = proxy.Context(INVENTORY, config, RESOLVER)
+    log.info("règles de contenu %s : version %d, %d motif(s), %d extension(s) interdite(s)", rules_path,
+             rules.version, len(rules.patterns), len(rules.forbidden_extensions))
+    proxy.CTX = proxy.Context(INVENTORY, config, RESOLVER, rules)
     try:
         proxy.serve(config.proxy_listen)
     except OSError as e:

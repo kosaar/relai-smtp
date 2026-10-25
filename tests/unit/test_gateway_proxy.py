@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from tests.unit import ROOT  # noqa: F401  (chemins d'import)
 from relaycfg import inventory as inv_mod
-from relaygw import crypto, proxy
+from relaygw import content, crypto, proxy
 from relaygw.keys import Lookup
 
 INVENTORY = inv_mod.parse({
@@ -118,6 +118,16 @@ class ProxyTest(unittest.TestCase):
         code, resp = self.send(ok, rcpts=("alice@example.com", "bob@example.com"))
         self.assertEqual(code, 451)
         self.assertIn(b"bob@example.com", resp)
+        self.assertEqual(Capture.received, [])
+
+    def test_content_refusal(self):
+        proxy.CTX.rules = content.parse({"version": 1, "patterns": [{"id": "private-key", "regex": "PRIVATE KEY"}]})
+        try:
+            code, resp = self.send(b"From: gitlab@example.com\r\n\r\n-----BEGIN PRIVATE KEY-----\r\n")
+        finally:
+            proxy.CTX.rules = None
+        self.assertEqual(code, 550)
+        self.assertIn(b"rule private-key", resp)
         self.assertEqual(Capture.received, [])
 
     def test_reinjection_down(self):

@@ -1,7 +1,7 @@
 # Plan d'implémentation : relais SMTP applicatif chiffrant (OpenPGP)
 
 > Statut : **validé le 2026-10-25 (toutes les décisions D1 à D12 acceptées)**. Implémentation lot par lot, un commit poussé par lot.
-> Avancement : lots 0 à 4 terminés.
+> Avancement : lots 0 à 4 et 6 terminés ; lot 5 (quotas) non réalisé, à la demande.
 > Base : branche `claude/vigilant-mccarthy-kgzh0e` (relai Postfix, liste blanche IP,
 > TLS + SASL vers le fournisseur, 19 tests d'intégration verts).
 > Branche de travail : `claude/gallant-shannon-7yirrk`.
@@ -205,7 +205,11 @@ en IMAPS dans la BAL Dovecot.
 | IT4.3 | Aucun `Received` ne révèle la topologie interne |
 | IT4.4 | Secret `gateway_hmac_key` absent ou trop court : démarrage refusé |
 
-### Lot 5 : quotas
+### Lot 5 : quotas — non réalisé
+
+Lot écarté à la demande : `quota_per_hour` reste validé dans l'inventaire
+mais n'est pas appliqué, et la supervision (lot 7) ne compte pas de
+dépassements de quota.
 
 | Test | Attendu |
 |---|---|
@@ -232,7 +236,7 @@ en IMAPS dans la BAL Dovecot.
 
 | Test | Attendu |
 |---|---|
-| IT7.1 | Après un refus faute de clé, un échec d'authentification, un dépassement de quota : les compteurs correspondants augmentent |
+| IT7.1 | Après un refus faute de clé, un échec d'authentification, un blocage de contenu : les compteurs correspondants augmentent (dépassement de quota : sans objet, lot 5 non réalisé) |
 | IT7.2 | Fournisseur arrêté : taille de file ≥ 1, âge du plus ancien > 0 |
 | IT7.3 | Date d'expiration du certificat du smarthost = celle du certificat de test |
 | IT7.4 | Clé expirant dans 10 jours : signalée « proche de l'expiration » |

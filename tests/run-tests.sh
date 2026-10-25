@@ -67,6 +67,7 @@ printf '%s' "$(rand 48)" >"$WORK/secrets/gateway_hmac_key"
 # Inventaire de test (modifiable par les suites) et un secret par application.
 mkdir -p "$WORK/config" "$WORK/secrets/apps"
 cp tests/fixtures/applications.toml "$WORK/config/applications.toml"
+cp config/content-rules.toml "$WORK/config/content-rules.toml"   # règles de production
 while read -r app; do
     printf '%s' "$(rand 24)" >"$WORK/secrets/apps/$app"
 done < <(sed -n 's/^\[applications\.\([a-z0-9-]*\)\]$/\1/p' tests/fixtures/applications.toml)

@@ -1,0 +1,45 @@
+# =============================================================================
+#  Règles de contrôle du contenu sortant (D8), appliquées par la passerelle
+#  AVANT chiffrement, au texte décodé : en-têtes, corps, pièces jointes
+#  (base64 et quoted-printable décodés), messages attachés.
+#  Un message qui enfreint une règle est refusé (550 5.7.1) ; seul
+#  l'identifiant de la règle est renvoyé et journalisé, jamais le contenu.
+#  Modifié par revue de code, comme l'inventaire ; validé au démarrage de la
+#  passerelle (règle invalide => refus de démarrer) et par la CI.
+# =============================================================================
+version = 1
+
+# --- Secrets reconnaissables -------------------------------------------------------
+[[patterns]]
+id = "private-key"
+description = "Bloc de clé privée (PEM, OpenSSH, PGP)"
+regex = '-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----'
+
+[[patterns]]
+id = "gitlab-token"
+description = "Jeton d'accès GitLab (personnel, projet, déploiement, runner…)"
+regex = '\b(?:glpat|gldt|glrt|glptt|glcbt|gloas)-[0-9A-Za-z_-]{20,}'
+
+[[patterns]]
+id = "aws-access-key"
+description = "Identifiant de clé d'accès AWS"
+regex = '\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'
+
+[[patterns]]
+id = "github-token"
+description = "Jeton GitHub"
+regex = '\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b|\bgithub_pat_[0-9A-Za-z_]{60,}'
+
+[[patterns]]
+id = "slack-token"
+description = "Jeton Slack"
+regex = '\bxox[abposr]-[0-9A-Za-z-]{10,}'
+
+# --- Pièces jointes ---------------------------------------------------------------
+[attachments]
+# Extensions exécutables ou de scripts refusées (dernière extension du nom).
+forbidden_extensions = ["exe", "com", "scr", "pif", "bat", "cmd", "msi", "msp", "dll",
+                        "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "ps1", "jar", "lnk", "reg"]
+# Taille maximale d'une pièce jointe décodée, en octets (0 = aucune limite ;
+# la taille du message reste limitée par MESSAGE_SIZE_LIMIT).
+max_size = 0

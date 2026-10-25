@@ -47,7 +47,7 @@ out=$(send_eml client-gitlab gitlab "/tmp/${id}.eml" alice@example.com) && rc=0 
 raw41=$WORK/${id}.raw
 if (( rc == 0 )) && mb_fetch alice@example.com "Subject: ${id}" 60 >"$raw41"; then
     relay_headers "$raw41" >"$WORK/${id}.relay"
-    extra=$(cut -d: -f1 "$WORK/${id}.relay" | tr 'A-Z' 'a-z' | grep -vE "$ALLOWED" | sort -u | tr '\n' ' ' || true)
+    extra=$(cut -d: -f1 "$WORK/${id}.relay" | tr '[:upper:]' '[:lower:]' | grep -vE "$ALLOWED" | sort -u | tr '\n' ' ' || true)
     leaks=$(grep -oE "$INTERNAL|X-GitLab|X-Mailer|User-Agent|infra-secrete" "$WORK/${id}.relay" | sort -u | tr '\n' ' ' || true)
     body_leak=$(grep -c -E 'X-GitLab|infra-secrete|internal\.lan' "$raw41" || true)
     if [[ -z $extra && -z $leaks && $body_leak == 0 ]]; then

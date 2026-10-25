@@ -25,7 +25,7 @@ GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Post
 ```
 
 > **Version 2 (en cours) :** le relai évolue vers un relai **chiffrant** (OpenPGP,
-> annuaire de clés, quotas, contrôle du contenu), lot par lot, selon
+> annuaire de clés, contrôle du contenu ; quotas non réalisés), lot par lot, selon
 > [plan-implementation.md](plan-implementation.md). Ce document décrit l'état
 > actuel. Le schéma détaillé se trouve dans [architecture.md](architecture.md).
 > Le guide [deploiement-production.md](deploiement-production.md) décrit encore
@@ -68,6 +68,7 @@ GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Post
 docker-compose.yml        stack de production (services relay et gateway)
 docker-compose.test.yml   surcharge de test (fournisseur simulé, poste destinataire, clients, relai à mauvais identifiants)
 config/applications.toml  inventaire versionné des applications (login, adresse, IP, quota)
+config/content-rules.toml règles versionnées du contrôle du contenu sortant (passerelle)
 common/relaycfg/          module Python partagé : lecture et validation de l'inventaire, CLI relay-config
 relay/Dockerfile          image du relai (contexte de construction : racine du dépôt)
 relay/entrypoint.sh       validation de la configuration, génération de /etc/postfix, lancement
@@ -152,6 +153,7 @@ clair restent dans le fichier ; vérifié par IT3.11c).
 | `RCPT TO` (milter) | clé OpenPGP **valide** du destinataire, lue dans le WKD de l'annuaire (HTTPS vérifié, cache `GATEWAY_KEY_CACHE_TTL`) : ni absente, ni expirée, ni révoquée, avec une sous-clé de chiffrement | `550 5.7.1 No valid OpenPGP key` **pour ce destinataire** (`no-key`, `key-expired`, `key-revoked`, `key-unusable`) ; annuaire injoignable : `451 4.7.1` |
 | fin du message (filtre) | IP du client (transmise par `XFORWARD`) déclarée pour l'application de l'enveloppe | `550 5.7.1` |
 | fin du message (filtre) | un seul en-tête `From:`, une seule adresse, égale à celle de l'application ; le nom affiché ne contient pas une autre adresse | `550 5.7.1` (`from-mismatch`, `from-multiple`, `from-invalid`, `from-display-spoof`) |
+| fin du message (filtre) | **contrôle du contenu** décodé (voir ci-dessous) | `550 5.7.1 Message blocked by content policy (rule <id>)` |
 | fin du message (filtre) | **chiffrement** PGP/MIME pour tous les destinataires acceptés, en-têtes extérieurs nettoyés (voir ci-dessous), réinjection | erreur interne : `451 4.7.1` ; réinjection impossible : `451 4.3.0` |
 
 La file de Postfix ne contient que du chiffré, y compris octet par octet dans
@@ -211,7 +213,27 @@ que dans la partie chiffrée.
 Changer `gateway_hmac_key` change tous les pseudonymes : les fils en cours
 sont alors coupés en deux dans Thunderbird.
 
-Les lots suivants ajoutent les quotas et le contrôle du contenu.
+**Contrôle du contenu** (D8), avant chiffrement, selon les règles versionnées
+`config/content-rules.toml` (modifiées par revue de code, comme l'inventaire).
+Elles s'appliquent au texte **décodé** : en-têtes (RFC 2047), corps et
+pièces jointes (base64 et quoted-printable décodés), messages attachés. Les
+archives (zip…) ne sont pas ouvertes.
+
+| Règle | Bloque |
+|-------|--------|
+| `private-key` | bloc `-----BEGIN … PRIVATE KEY-----` (PEM, OpenSSH, `PGP PRIVATE KEY BLOCK`) |
+| `gitlab-token`, `github-token`, `aws-access-key`, `slack-token` | jetons reconnaissables (`glpat-…`, `ghp_…`, `AKIA…`, `xoxb-…`) |
+| `forbidden-extension` | pièce jointe exécutable ou script (`.exe`, `.bat`, `.js`, `.ps1`, `.jar`…, dernière extension du nom) |
+| `attachment-too-big` | pièce jointe décodée plus grande que `max_size` (désactivé par défaut) |
+
+Le refus (`550 5.7.1`) et le journal (`reason=content:<règle>`) ne portent
+que l'identifiant de la règle, jamais le contenu trouvé. Un fichier de règles
+absent ou invalide (regex incorrecte, identifiant en double, clé inconnue)
+empêche la passerelle de démarrer ; les tests unitaires (CI) valident le
+fichier de production.
+
+Les quotas par application (lot 5) n'ont pas été réalisés : `quota_per_hour`
+est validé dans l'inventaire mais n'est pas appliqué.
 
 ### Annuaire de clés (`keydir/`)
 
@@ -291,7 +313,7 @@ en CI. Le nom de la table est le **login SMTP** de l'application.
 sender_domain = "example.com"      # domaine d'envoi vérifié chez le fournisseur
 
 [defaults]
-quota_per_hour = 200               # messages par heure glissante (appliqué au lot 5)
+quota_per_hour = 200               # messages par heure (validé, non appliqué : lot 5 non réalisé)
 
 [applications.gitlab]
 description = "GitLab : notifications"
@@ -339,7 +361,8 @@ PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 | `KEYDIR_DOMAINS` | domaines dont l'annuaire publie les clés (séparés par des espaces) | — | **oui** |
 | `KEYDIR_AUDIT_RETENTION_DAYS` | durée de conservation du journal d'audit de l'annuaire, en jours | `365` | non |
 
-Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`
+Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`,
+`GATEWAY_CONTENT_RULES_FILE=/etc/relay/content-rules.toml`
 (répertoire `config/` monté en lecture seule), `RELAY_APP_SECRETS_DIR=/run/secrets/apps`
 (répertoire `secrets/apps/` monté en lecture seule), `RELAY_MILTER=inet:gateway:9900`,
 `RELAY_PROXY_FILTER=gateway:10025`, `RELAY_REINJECT_PORT=10026` (relai),
@@ -609,6 +632,10 @@ Vérifications automatiques (une ligne PASS/FAIL par test) :
 | IT4.2 | réponse dans un fil (après redémarrage de la passerelle) : `In-Reply-To` et `References` = `Message-ID` pseudonymisé du premier message ; identifiants d'origine dans la partie déchiffrée |
 | IT4.3 | aucun `Received` transmis par le relai ; seuls ceux du fournisseur, sans topologie interne |
 | IT4.4 | secret `gateway_hmac_key` absent ou trop court : la passerelle refuse de démarrer |
+| IT6.1 | bloc de clé privée OpenSSH dans le corps : `550 5.7.1 … (rule private-key)`, rien de livré, ni la clé ni le corps dans les journaux |
+| IT6.2 | jeton GitLab dans une pièce jointe encodée en base64 (absent du message brut) : détecté après décodage, refusé |
+| IT6.3 | pièce jointe `.exe` : refusée (`forbidden-extension`) |
+| IT6.4 | message sain (texte, PDF joint) : livré ; règles invalides ou absentes : la passerelle refuse de démarrer |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -627,6 +654,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 
 - **Pas d'open relay.** Relayer exige une authentification SASL ; aucun domaine local n'existe ; un inventaire vide ou invalide empêche le démarrage.
 - **Chiffrement de bout en bout** : le message est chiffré pour ses destinataires avant la mise en file (filtre avant file, rien n'est écrit en clair) ; ni la file, ni le fournisseur, ni la BAL ne voient le contenu ou l'objet réel. Destinataire sans clé validée : refus, jamais d'envoi en clair.
+- **Pas de secret en clair qui sorte** : clés privées, jetons d'accès et exécutables sont bloqués avant chiffrement (`config/content-rules.toml`).
 - **Métadonnées minimales** : en-têtes extérieurs en liste blanche, identifiants de message pseudonymisés, aucun `Received` interne.
 - **Trois verrous par application** : son mot de passe, ses IP (liste blanche globale dès la connexion, puis liaison login ↔ IP dans la passerelle) et son adresse (enveloppe dans Postfix, `From:` dans la passerelle). Un identifiant volé ne sert ni depuis une autre machine, ni pour usurper une autre application.
 - **Aucun mot de passe en clair** : STARTTLS obligatoire avant AUTH, TLS ≥ 1.2. Essais limités par IP (`RELAY_AUTH_RATE_LIMIT`).
@@ -654,6 +682,7 @@ sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
 | `550 5.7.1 This login is not allowed from this host` | Le login est utilisé depuis l'IP d'une autre application. |
 | `454 4.3.0 Try again later` | Passerelle arrêtée ou injoignable : `docker compose ps gateway`, `docker compose logs gateway`. |
 | `451 4.3.0 Reinjection failed` | La passerelle ne peut pas réinjecter dans le relai : logs du relai (`postfix/reinject`) ; adresse de la passerelle différente de celle vue au démarrage du relai (healthcheck `gateway IP changed`) : `docker compose restart relay`. |
+| `550 5.7.1 Message blocked by content policy (rule …)` | Le message contient ce que la règle indiquée interdit (clé privée, jeton, exécutable) : corriger le contenu côté application ; ne pas affaiblir la règle sans revue. |
 | `550 5.7.1 No valid OpenPGP key for <adresse>` | Le destinataire n'a pas de clé validée dans l'annuaire (ou elle est expirée, révoquée) : `docker compose exec keydir keydir-admin show <adresse>` ; le motif exact est dans les logs de la passerelle (`reason=`). |
 | `451 4.7.1 Key directory unavailable` | La passerelle ne joint pas l'annuaire (arrêté, certificat non reconnu : `GATEWAY_KEYDIR_CA_FILE`). |
 | Le destinataire ne peut pas déchiffrer dans Thunderbird | Sa clé privée ne correspond pas à la clé validée (rotation non faite côté annuaire) : comparer les empreintes. |
