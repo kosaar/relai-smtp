@@ -6,26 +6,41 @@
 #      -f docker-compose.yml -f docker-compose.test.yml up -d --build
 #
 #  Réseaux (IP fixes, sans accès extérieur) :
-#    private  10.0.1.0/24 : client-gitlab .10, client-jenkins .20,
-#                           client-unknown .30 (NON déclaré), relay .5,
-#                           relay-badcreds .6
+#    private  10.0.1.0/24 : clients gitlab .10, jenkins .20, unknown .30 (NON
+#                           déclaré), glpi .40, youtrack .45, new .50 (déclaré
+#                           en cours de test, IT1.10) ; relay .5 (alias
+#                           smtp-relay), relay-badcreds .6
 #    internet 10.0.2.0/24 : relay .5, relay-badcreds .6, provider .10,
 #                           workstation .50
+#    backend  10.0.3.0/24 : relay .5, relay-badcreds .6, gateway .20
+#  Inventaire : tests/.work/config/applications.toml (copie de
+#  tests/fixtures/applications.toml) ; secrets : tests/.work/secrets.
 # =============================================================================
 
 x-relay-test-env: &relay-test-env
-  ALLOWED_CLIENT_IPS: "10.0.1.10,10.0.1.20"
-  SENDER_DOMAIN: example.com
-  SENDER_ADDRESS: noreply@example.com
-  SENDER_REWRITE_MODE: always
   RELAY_HOST: provider
   RELAY_PORT: "587"
   RELAY_TLS_SECURITY_LEVEL: secure
   RELAY_TLS_CA_FILE: /etc/test-pki/ca.crt
+  RELAY_TLS_CERT_FILE: /etc/test-pki/smtp-relay.crt
+  RELAY_TLS_KEY_FILE: /etc/test-pki/smtp-relay.key
+  RELAY_AUTH_RATE_LIMIT: "1000"
 
-x-depends-provider: &depends-provider
+x-depends-relay: &depends-relay
   provider:
     condition: service_healthy
+  gateway:
+    condition: service_healthy
+
+x-client: &client
+  build: ./test/client
+  image: smtp-relay-test/client:latest
+  init: true
+  volumes:
+    - test-pki:/pki:ro
+  depends_on:
+    pki:
+      condition: service_completed_successfully
 
 services:
   # One-shot : PKI de test (AC + certificats provider, smtp-relay, keydir).
@@ -42,20 +57,30 @@ services:
 
   relay:
     environment: *relay-test-env
+    secrets: !override
+      - relay_smtp_username
+      - relay_smtp_password
     ports: !reset []
-    volumes:
+    volumes: !override
+      - relay-queue:/var/spool/postfix
       - test-pki:/etc/test-pki:ro
+      - ./tests/.work/config:/etc/relay:ro
+      - ./tests/.work/secrets/apps:/run/secrets/apps:ro
     networks: !override
       private:
         ipv4_address: 10.0.1.5
+        aliases: [smtp-relay]
       internet:
         ipv4_address: 10.0.2.5
-    depends_on: *depends-provider
+      backend:
+        ipv4_address: 10.0.3.5
+    depends_on: *depends-relay
     healthcheck:
       interval: 5s
       start_period: 10s
 
-  # Même image, identifiants SASL ERRONÉS : les mails doivent rester en file.
+  # Même image, identifiants SASL ERRONÉS chez le fournisseur : les mails
+  # doivent rester en file.
   relay-badcreds:
     extends:
       file: docker-compose.yml
@@ -64,21 +89,37 @@ services:
     environment:
       <<: *relay-test-env
       RELAY_SMTP_PASSWORD_FILE: /run/secrets/relay_smtp_password_bad
-    secrets:
+    secrets: !override
+      - relay_smtp_username
+      - relay_smtp_password
       - relay_smtp_password_bad
     ports: !reset []
     volumes: !override
       - relay-badcreds-queue:/var/spool/postfix
       - test-pki:/etc/test-pki:ro
+      - ./tests/.work/config:/etc/relay:ro
+      - ./tests/.work/secrets/apps:/run/secrets/apps:ro
     networks: !override
       private:
         ipv4_address: 10.0.1.6
       internet:
         ipv4_address: 10.0.2.6
-    depends_on: *depends-provider
+      backend:
+        ipv4_address: 10.0.3.6
+    depends_on: *depends-relay
     healthcheck:
       interval: 5s
       start_period: 10s
+
+  gateway:
+    volumes: !override
+      - ./tests/.work/config:/etc/relay:ro
+    networks: !override
+      backend:
+        ipv4_address: 10.0.3.20
+    healthcheck:
+      interval: 5s
+      start_period: 5s
 
   # Fournisseur simulé : smarthost Postfix 587 (TLS + SASL) -> LMTP -> Dovecot (IMAPS).
   provider:
@@ -117,46 +158,46 @@ services:
         condition: service_completed_successfully
 
   client-gitlab:
-    build: ./test/client
-    image: smtp-relay-test/client:latest
+    <<: *client
     hostname: gitlab
-    init: true
-    volumes:
-      - test-pki:/pki:ro
     networks:
       private:
         ipv4_address: 10.0.1.10
-    depends_on:
-      pki:
-        condition: service_completed_successfully
 
   client-jenkins:
-    build: ./test/client
-    image: smtp-relay-test/client:latest
+    <<: *client
     hostname: jenkins
-    init: true
-    volumes:
-      - test-pki:/pki:ro
     networks:
       private:
         ipv4_address: 10.0.1.20
-    depends_on:
-      pki:
-        condition: service_completed_successfully
 
   client-unknown:
-    build: ./test/client
-    image: smtp-relay-test/client:latest
+    <<: *client
     hostname: unknown-app
-    init: true
-    volumes:
-      - test-pki:/pki:ro
     networks:
       private:
         ipv4_address: 10.0.1.30
-    depends_on:
-      pki:
-        condition: service_completed_successfully
+
+  client-glpi:
+    <<: *client
+    hostname: glpi
+    networks:
+      private:
+        ipv4_address: 10.0.1.40
+
+  client-youtrack:
+    <<: *client
+    hostname: youtrack
+    networks:
+      private:
+        ipv4_address: 10.0.1.45
+
+  client-new:
+    <<: *client
+    hostname: newapp
+    networks:
+      private:
+        ipv4_address: 10.0.1.50
 
 networks:
   private:
@@ -169,6 +210,11 @@ networks:
     ipam:
       config:
         - subnet: 10.0.2.0/24
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.0.3.0/24
 
 volumes:
   test-pki:

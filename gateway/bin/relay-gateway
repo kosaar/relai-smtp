@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+# Point d'entrée de la passerelle (milter). Voir relaygw/milter.py.
+import sys
+
+sys.path.insert(0, "/opt/relay/lib")
+from relaygw.milter import main  # noqa: E402
+
+sys.exit(main())

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  Entrypoint du relai SMTP.
-#  1. lit et valide la configuration (variables d'environnement + secrets) ;
-#  2. génère /etc/postfix (main.cf, master.cf, réécriture, identifiants) ;
-#  3. lance Postfix au premier plan ("postfix start-fg", logs sur stdout).
+#  1. valide l'inventaire des applications et leurs secrets (relay-config) ;
+#  2. lit et valide le reste de la configuration (environnement + secrets) ;
+#  3. génère /etc/postfix (main.cf, master.cf, base SASL des applications,
+#     sender_login_maps, mynetworks, certificat, identifiants du fournisseur) ;
+#  4. lance Postfix au premier plan ("postfix start-fg", logs sur stdout).
 #  Toute valeur absente ou invalide => arrêt immédiat (code 1), jamais de
 #  fonctionnement dégradé ou "ouvert".
 # =============================================================================
@@ -40,6 +42,14 @@ read_secret() {
     printf -v "$var" '%s' "$value"
 }
 
+# Chemin d'un fichier secret : <NOM>_FILE > /run/secrets/<nom>.
+secret_path() {
+    local file_var="${1}_FILE"
+    local file=${!file_var:-$2}
+    [[ -r $file ]] || die "${1} manquant : fournir le secret ${2} (ou ${file_var})."
+    printf '%s' "$file"
+}
+
 render() {  # render <template> <destination> : remplace les @@VAR@@
     local line var
     while IFS= read -r line || [[ -n $line ]]; do
@@ -53,36 +63,38 @@ render() {  # render <template> <destination> : remplace les @@VAR@@
 
 re_domain='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
 re_host='^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
-re_local='^[A-Za-z0-9!#$%&*+/=?^_`{|}~.-]+$'
 
 is_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 
 configure() {
-    # ---- Liste blanche (validée en premier : c'est l'exigence de sécurité n°1)
-    build_allowlist
-
-    # ---- Domaine / adresse d'expédition
-    SENDER_DOMAIN=${SENDER_DOMAIN:-}
-    SENDER_DOMAIN=${SENDER_DOMAIN,,}
-    [[ -n $SENDER_DOMAIN ]] || die "SENDER_DOMAIN est obligatoire (ex. example.com)."
-    [[ $SENDER_DOMAIN =~ $re_domain ]] || die "SENDER_DOMAIN='${SENDER_DOMAIN}' n'est pas un nom de domaine valide."
-
-    SENDER_ADDRESS=${SENDER_ADDRESS:-noreply@${SENDER_DOMAIN}}
-    local s_local=${SENDER_ADDRESS%@*} s_domain=${SENDER_ADDRESS##*@}
-    s_domain=${s_domain,,}
-    [[ $SENDER_ADDRESS == *@* && $s_local =~ $re_local && $s_local != .* && $s_local != *. ]] \
-        || die "SENDER_ADDRESS='${SENDER_ADDRESS}' n'est pas une adresse email valide."
-    [[ $s_domain == "$SENDER_DOMAIN" || $s_domain == *".${SENDER_DOMAIN}" ]] \
-        || die "SENDER_ADDRESS='${SENDER_ADDRESS}' n'appartient pas à SENDER_DOMAIN='${SENDER_DOMAIN}'."
-    SENDER_ADDRESS="${s_local}@${s_domain}"
-
-    SENDER_REWRITE_MODE=${SENDER_REWRITE_MODE:-always}
-    [[ $SENDER_REWRITE_MODE =~ ^(always|foreign)$ ]] \
-        || die "SENDER_REWRITE_MODE='${SENDER_REWRITE_MODE}' invalide (always | foreign)."
+    # ---- Inventaire des applications (exigence de sécurité n°1 : validé en premier)
+    RELAY_INVENTORY_FILE=${RELAY_INVENTORY_FILE:-/etc/relay/applications.toml}
+    RELAY_APP_SECRETS_DIR=${RELAY_APP_SECRETS_DIR:-/run/secrets/apps}
+    export RELAY_INVENTORY_FILE RELAY_APP_SECRETS_DIR
+    local out
+    out=$(relay-config check 2>&1) || { printf '%s\n' "$out" >&2; die "inventaire ${RELAY_INVENTORY_FILE} ou secrets ${RELAY_APP_SECRETS_DIR} invalides."; }
+    INVENTORY_SUMMARY=$out
+    SENDER_DOMAIN=$(relay-config domain)
 
     RELAY_HOSTNAME=${RELAY_HOSTNAME:-relay.${SENDER_DOMAIN}}
     RELAY_HOSTNAME=${RELAY_HOSTNAME,,}
     [[ $RELAY_HOSTNAME =~ $re_domain ]] || die "RELAY_HOSTNAME='${RELAY_HOSTNAME}' invalide (FQDN attendu)."
+
+    # ---- Certificat de soumission (587)
+    RELAY_TLS_CERT=$(secret_path RELAY_TLS_CERT /run/secrets/relay_tls_cert)
+    RELAY_TLS_KEY=$(secret_path RELAY_TLS_KEY /run/secrets/relay_tls_key)
+    out=$(relay-config tls-check --cert "$RELAY_TLS_CERT" --key "$RELAY_TLS_KEY" 2>&1) \
+        || { printf '%s\n' "$out" >&2; die "certificat de soumission invalide."; }
+
+    # ---- Passerelle (milter) : obligatoire, aucun message ne passe sans elle
+    RELAY_MILTER=${RELAY_MILTER:-inet:gateway:9900}
+    [[ $RELAY_MILTER =~ ^inet:[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] \
+        || die "RELAY_MILTER='${RELAY_MILTER}' invalide (ex. inet:gateway:9900)."
+
+    # ---- Limitation des tentatives d'authentification (par IP et par minute)
+    RELAY_AUTH_RATE_LIMIT=${RELAY_AUTH_RATE_LIMIT:-30}
+    [[ $RELAY_AUTH_RATE_LIMIT =~ ^[0-9]+$ ]] && (( RELAY_AUTH_RATE_LIMIT >= 1 )) \
+        || die "RELAY_AUTH_RATE_LIMIT='${RELAY_AUTH_RATE_LIMIT}' invalide (entier >= 1)."
 
     # ---- Fournisseur cloud
     RELAY_HOST=${RELAY_HOST:-}
@@ -114,10 +126,7 @@ configure() {
     [[ $RELAY_SMTP_USERNAME != *[[:space:]]* ]] || die "RELAY_SMTP_USERNAME ne doit pas contenir d'espace."
     [[ $RELAY_SMTP_USERNAME != *:* ]] || die "RELAY_SMTP_USERNAME ne doit pas contenir ':'."
 
-    # ---- Côté applications
-    RELAY_LISTEN_PORT=${RELAY_LISTEN_PORT:-25}
-    is_port "$RELAY_LISTEN_PORT" || die "RELAY_LISTEN_PORT='${RELAY_LISTEN_PORT}' invalide."
-
+    # ---- Divers
     MESSAGE_SIZE_LIMIT=${MESSAGE_SIZE_LIMIT:-10240000}
     [[ $MESSAGE_SIZE_LIMIT =~ ^[0-9]+$ ]] && (( MESSAGE_SIZE_LIMIT >= 102400 )) \
         || die "MESSAGE_SIZE_LIMIT='${MESSAGE_SIZE_LIMIT}' invalide (octets, >= 102400)."
@@ -125,8 +134,7 @@ configure() {
     QUEUE_LIFETIME=${QUEUE_LIFETIME:-5d}
     [[ $QUEUE_LIFETIME =~ ^[0-9]+[smhdw]$ ]] || die "QUEUE_LIFETIME='${QUEUE_LIFETIME}' invalide (ex. 5d, 12h)."
 
-    if (( HAS_IPV6 )); then INET_PROTOCOLS=all; else INET_PROTOCOLS=ipv4; fi
-    INET_PROTOCOLS=${RELAY_INET_PROTOCOLS:-$INET_PROTOCOLS}
+    INET_PROTOCOLS=${RELAY_INET_PROTOCOLS:-ipv4}
     [[ $INET_PROTOCOLS =~ ^(ipv4|ipv6|all)$ ]] || die "RELAY_INET_PROTOCOLS='${INET_PROTOCOLS}' invalide."
 }
 
@@ -137,19 +145,23 @@ generate() {
     render "$TEMPLATES/main.cf.tmpl" "$PF/main.cf"
     render "$TEMPLATES/master.cf.tmpl" "$PF/master.cf"
 
-    # Réécriture de l'expéditeur (table regexp, insensible à la casse).
-    local dom_re=${SENDER_DOMAIN//./\\.}
-    {
-        echo "# Généré par entrypoint.sh — mode ${SENDER_REWRITE_MODE}"
-        if [[ $SENDER_REWRITE_MODE == always ]]; then
-            echo "/^.+\$/ ${SENDER_ADDRESS}"
-        else
-            # Seuls les expéditeurs hors domaine (et hors sous-domaines) sont réécrits.
-            echo "!/@([a-z0-9-]+\\.)*${dom_re}\$/ ${SENDER_ADDRESS}"
-        fi
-    } >"$PF/sender_canonical.regexp"
+    # Applications : sender_login_maps, mynetworks (liste blanche IP) et base
+    # SASL (realm = myhostname, car smtpd_sasl_local_domain est vide).
+    install -d -o root -g postfix -m 0750 "$PF/sasl"
+    render "$TEMPLATES/smtpd-sasl.conf.tmpl" "$PF/sasl/smtpd.conf"
+    relay-config postfix --out "$PF" --sasldb "$PF/sasl/sasldb2" --realm "$RELAY_HOSTNAME" >/dev/null
+    chown root:postfix "$PF"/sasl/sasldb2*
+    chmod 0640 "$PF"/sasl/sasldb2*
 
-    # Identifiants SASL : fichier root:root 0600, jamais dans l'image.
+    # Certificat de soumission : clé + chaîne dans un seul fichier root 0600
+    # (lu par Postfix avant l'abandon des privilèges).
+    (
+        umask 077
+        install -d -m 0700 "$PF/tls"
+        cat "$RELAY_TLS_KEY" "$RELAY_TLS_CERT" >"$PF/tls/submission.pem"
+    )
+
+    # Identifiants du fournisseur : fichier root:root 0600, jamais dans l'image.
     (
         umask 077
         printf '[%s]:%s %s:%s\n' "$RELAY_HOST" "$RELAY_PORT" \
@@ -166,10 +178,11 @@ generate() {
 }
 
 summary() {
-    log "Relai SMTP ${RELAY_HOSTNAME} (écoute :${RELAY_LISTEN_PORT}, sans TLS/auth côté réseau privé)"
-    log "Clients autorisés : ${ALLOWED_LIST} — tout autre client est rejeté."
+    log "Relai SMTP ${RELAY_HOSTNAME} : soumission :587 (STARTTLS >= TLSv1.2 obligatoire + SASL par application)"
+    log "${INVENTORY_SUMMARY%%$'\n'*}"
+    log "Seules les IP de l'inventaire peuvent se connecter ; chaque login n'envoie qu'avec son adresse."
+    log "Passerelle (milter) : ${RELAY_MILTER} (injoignable => 451, rien n'est accepté)"
     log "Relayhost : [${RELAY_HOST}]:${RELAY_PORT} TLS=${RELAY_TLS_SECURITY_LEVEL} wrappermode=${RELAY_TLS_WRAPPERMODE} >=TLSv1.2, SASL user=${RELAY_SMTP_USERNAME}"
-    log "Expéditeur : ${SENDER_ADDRESS} (réécriture : ${SENDER_REWRITE_MODE}), taille max ${MESSAGE_SIZE_LIMIT} o"
 }
 
 configure

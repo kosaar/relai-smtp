@@ -82,7 +82,7 @@ avant que Postfix l'accepte (`250 queued`). Si la passerelle ne répond pas,
 |---|---|---|
 | D1 | Liste blanche IP existante | **Conservée** en défense en profondeur, en plus du SASL (un identifiant volé ne sert pas hors du VLAN Applications). |
 | D2 | Ruptures de compatibilité | **Port 25 supprimé** (F8) et **réécriture d'expéditeur supprimée** au profit de la liaison login ↔ adresse. Version 2.0.0. |
-| D3 | Inventaire des applications | `config/applications.toml` (nom, adresse expéditrice, quota, IP) + un secret par application `secrets/app_<nom>_password`. Validé par `relay-config check`, utilisé aussi en CI. Ajouter une application = une entrée + un secret. |
+| D3 | Inventaire des applications | `config/applications.toml` (nom, adresse expéditrice, quota, IP) + un secret par application `secrets/apps/<nom>` (répertoire monté, pour qu'ajouter une application ne demande pas de modifier `docker-compose.yml`). Validé par `relay-config check`, utilisé aussi en CI. Ajouter une application = une entrée + un secret. |
 | D4 | Format chiffré | PGP/MIME (RFC 3156) avec **en-têtes protégés** (`protected-headers="v1"`, lus par Thunderbird) : objet réel chiffré, objet extérieur neutre configurable. Un seul message chiffré pour tous les destinataires d'une transaction, identifiants de clés masqués (`--throw-keyids`) pour ne pas trahir les Cci. |
 | D5 | Échec fermé | Destinataire sans clé valide (absente, expirée, révoquée, sans sous-clé de chiffrement) : `550 5.7.1` au `RCPT TO`, pour ce destinataire. Passerelle ou annuaire injoignable : `451 4.7.1` (l'application réessaie). Jamais d'envoi en clair. |
 | D6 | Annuaire | Service léger `keydir` : dépôt HTTPS, validation admin par CLI (comparaison d'empreinte hors bande), publication **WKD** (standard lu par Thunderbird et GnuPG), certificat de révocation appliqué immédiatement, rotation = nouvelle clé validée qui remplace l'ancienne. La passerelle interroge le WKD de l'annuaire avec un cache (TTL configurable, 5 min par défaut). |
@@ -124,7 +124,8 @@ en IMAPS dans la BAL Dovecot.
   l'inventaire et les secrets), `smtpd_sender_login_maps` +
   `reject_sender_login_mismatch`, limitation des tentatives d'authentification (anvil).
 - Inventaire `config/applications.toml` + `relay-config check`.
-- Passerelle (squelette) : contrôle que l'en-tête `From:` correspond à l'adresse du login.
+- Passerelle (squelette) : contrôle que l'en-tête `From:` correspond à l'adresse du login,
+  et que le login n'est utilisé que depuis les IP déclarées pour l'application.
 
 | Test | Attendu |
 |---|---|
@@ -135,7 +136,7 @@ en IMAPS dans la BAL Dovecot.
 | IT1.5 | Sans authentification : refusé |
 | IT1.6 | Login `gitlab` avec `MAIL FROM:<jenkins@…>` : `553 5.7.1` ; enveloppe correcte mais `From:` usurpé : `550 5.7.1` |
 | IT1.7 | Port 25 du relai : connexion refusée |
-| IT1.8 | Identifiants valides depuis une IP hors liste blanche : refusé |
+| IT1.8 | Identifiants valides depuis une IP hors liste blanche, ou depuis l'IP d'une autre application : refusé |
 | IT1.9 | Inventaire invalide (adresse en double, secret absent, adresse hors domaine, quota invalide) : démarrage refusé avec message `FATAL` |
 | IT1.10 | Ajout d'une application (entrée + secret) puis redémarrage : la nouvelle application envoie, les autres ne sont pas affectées |
 

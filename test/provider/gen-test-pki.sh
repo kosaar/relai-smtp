@@ -4,7 +4,7 @@
 #  stack de test dans /pki (volume partagé, monté en lecture seule ailleurs) :
 #    ca.crt                      AC de test (seul fichier à faire confiance)
 #    provider.{crt,key}          fournisseur simulé (SMTP 587 + IMAPS 993)
-#    smtp-relay.{crt,key}        relai (soumission 587, lot 1)
+#    smtp-relay.{crt,key}        relai (soumission 587 ; aussi relay-badcreds)
 #    keydir.{crt,key}            annuaire de clés (HTTPS, lot 2)
 #  La clé de l'AC est détruite après usage. Les clés privées sont lisibles par
 #  tous : elles sont partagées entre conteneurs d'UID différents (test seulement).
@@ -18,7 +18,7 @@ DAYS=${PKI_DAYS:-30}
 # name -> SAN
 declare -A SANS=(
     [provider]="DNS:provider,DNS:smtp.provider.test,DNS:imap.provider.test"
-    [smtp-relay]="DNS:smtp-relay,DNS:relay"
+    [smtp-relay]="DNS:smtp-relay,DNS:relay,DNS:relay-badcreds"
     [keydir]="DNS:keydir,DNS:openpgpkey.example.com"
 )
 

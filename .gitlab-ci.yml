@@ -1,9 +1,10 @@
 # =============================================================================
 #  CI GitLab du relai SMTP.
 #   lint        : shellcheck, compilation Python, tests unitaires (tests/ci/lint.sh)
+#                 + validation de l'inventaire des applications (relay-config check)
 #   integration : construction des images + tests d'intégration et de bout en
 #                 bout (tests/run-tests.sh : vrais Postfix, Dovecot, GnuPG, RNP)
-#   release     : image du relai poussée dans le registre du projet (tags git)
+#   release     : images du relai et de la passerelle poussées dans le registre (tags git)
 #
 #  Prérequis du runner pour « integration » et « release » : exécuteur Docker
 #  avec service docker:dind en mode privilégié. La stack de test monte des
@@ -29,6 +30,15 @@ lint:
     - apt-get install -y -qq --no-install-recommends shellcheck python3 git >/dev/null
   script:
     - tests/ci/lint.sh
+
+relay-config check:
+  stage: lint
+  image: ubuntu:${UBUNTU_TAG}
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends python3 >/dev/null
+  script:
+    - PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
 
 .docker:
   image: docker:29
@@ -57,5 +67,7 @@ release:
     - if: $CI_COMMIT_TAG
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-    - docker build --build-arg VERSION="$CI_COMMIT_TAG" -t "$CI_REGISTRY_IMAGE/smtp-relay:$CI_COMMIT_TAG" relay
+    - docker build --build-arg VERSION="$CI_COMMIT_TAG" -f relay/Dockerfile -t "$CI_REGISTRY_IMAGE/smtp-relay:$CI_COMMIT_TAG" .
+    - docker build --build-arg VERSION="$CI_COMMIT_TAG" -f gateway/Dockerfile -t "$CI_REGISTRY_IMAGE/smtp-relay-gateway:$CI_COMMIT_TAG" .
     - docker push "$CI_REGISTRY_IMAGE/smtp-relay:$CI_COMMIT_TAG"
+    - docker push "$CI_REGISTRY_IMAGE/smtp-relay-gateway:$CI_COMMIT_TAG"

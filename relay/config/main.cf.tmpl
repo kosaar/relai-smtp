@@ -1,10 +1,10 @@
 # =============================================================================
 #  main.cf — GÉNÉRÉ AU DÉMARRAGE par entrypoint.sh à partir de main.cf.tmpl.
-#  Ne pas modifier dans le conteneur : changer les variables d'environnement.
+#  Ne pas modifier dans le conteneur : changer l'inventaire ou l'environnement.
 # =============================================================================
 compatibility_level = 3.6
 
-# --- Identité (dérivée de SENDER_DOMAIN) -------------------------------------
+# --- Identité ------------------------------------------------------------------
 myhostname = @@RELAY_HOSTNAME@@
 mydomain = @@SENDER_DOMAIN@@
 myorigin = $mydomain
@@ -22,34 +22,61 @@ alias_maps =
 alias_database =
 biff = no
 
-# --- Liste blanche d'IP + refus par défaut ------------------------------------
-# mynetworks ne contient QUE les adresses d'hôtes déclarées (/32, /128).
-mynetworks = @@MYNETWORKS@@
+# --- Soumission (587) : TLS obligatoire --------------------------------------
+smtpd_tls_security_level = encrypt
+smtpd_tls_chain_files = /etc/postfix/tls/submission.pem
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_ciphers = high
+smtpd_tls_mandatory_ciphers = high
+smtpd_tls_loglevel = 1
+smtpd_tls_received_header = no
+
+# --- Authentification SASL par application ------------------------------------
+smtpd_sasl_auth_enable = yes
+smtpd_sasl_type = cyrus
+cyrus_sasl_config_path = /etc/postfix/sasl
+smtpd_sasl_path = smtpd
+# Realm vide : la base est indexée sur myhostname (cf. relay-config postfix).
+smtpd_sasl_local_domain =
+# AUTH n'est proposé qu'après STARTTLS.
+smtpd_tls_auth_only = yes
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_tls_security_options = noanonymous
+broken_sasl_auth_clients = no
+# Limitation des tentatives d'authentification par IP (anvil), sans exception.
+smtpd_client_auth_rate_limit = @@RELAY_AUTH_RATE_LIMIT@@
+smtpd_client_event_limit_exceptions =
+
+# --- Contrôles d'accès ----------------------------------------------------------
+# 1. Liste blanche IP (défense en profondeur) : seules les IP de l'inventaire
+#    (et la boucle locale du healthcheck) se connectent. Refus dès la bannière.
+mynetworks = /etc/postfix/mynetworks
+smtpd_delay_reject = no
 smtpd_client_restrictions = permit_mynetworks, reject
-smtpd_relay_restrictions = permit_mynetworks, reject
-smtpd_recipient_restrictions = permit_mynetworks, reject
+# 2. Chaque login n'envoie qu'avec l'adresse qui lui est attribuée.
+smtpd_sender_login_maps = texthash:/etc/postfix/sender_login_maps
+smtpd_sender_restrictions = reject_sender_login_mismatch, permit_sasl_authenticated, reject
+# 3. Relai réservé aux applications authentifiées (mynetworks NE suffit PAS).
+smtpd_relay_restrictions = permit_sasl_authenticated, reject
+smtpd_recipient_restrictions = permit_sasl_authenticated, reject
 smtpd_data_restrictions = reject_unauth_pipelining
-# Le refus est appliqué à la commande RCPT TO : la ligne de log contient alors
-# l'IP source, l'expéditeur, le destinataire et le motif ("Access denied").
-smtpd_delay_reject = yes
 smtpd_reject_footer = Relay access is restricted to registered applications.
 smtpd_helo_required = yes
 disable_vrfy_command = yes
-smtpd_sasl_auth_enable = no
-# Réseau privé : ni TLS ni authentification côté applications (exigence).
-smtpd_tls_security_level = none
 message_size_limit = @@MESSAGE_SIZE_LIMIT@@
 mailbox_size_limit = 0
 
-# --- Réécriture de l'expéditeur ----------------------------------------------
-# Enveloppe (MAIL FROM) ET en-têtes (From:, Sender:, ...) ; le nom affiché est
-# conservé ("GitLab <noreply@example.com>").
-sender_canonical_maps = regexp:/etc/postfix/sender_canonical.regexp
-sender_canonical_classes = envelope_sender, header_sender
-# Par défaut Postfix ne réécrit pas les en-têtes des clients distants :
-# on l'autorise pour les applications déclarées.
-local_header_rewrite_clients = permit_mynetworks
-# Le Reply-To d'origine éventuel est conservé (non réécrit).
+# --- Passerelle (milter) appelée AVANT la mise en file -------------------------
+# Passerelle injoignable ou en erreur => 451 (l'application réessaie) : jamais
+# de message accepté sans passer par elle.
+smtpd_milters = @@RELAY_MILTER@@
+non_smtpd_milters =
+milter_default_action = tempfail
+milter_protocol = 6
+milter_connect_timeout = 10s
+milter_command_timeout = 30s
+milter_content_timeout = 120s
 
 # --- Relai sortant vers le fournisseur cloud ---------------------------------
 relayhost = [@@RELAY_HOST@@]:@@RELAY_PORT@@

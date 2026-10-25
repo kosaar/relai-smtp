@@ -2,7 +2,7 @@
 # Healthcheck Docker : le processus maître Postfix tourne ET le service SMTP
 # répond par une bannière 220 sur le port d'écoute.
 set -euo pipefail
-port=${RELAY_LISTEN_PORT:-25}
+port=587
 
 # Processus maître vivant (sans "postfix status", qui journalise à chaque appel).
 pidfile=$(postconf -h queue_directory)/pid/master.pid

@@ -6,6 +6,7 @@
 # =============================================================================
 set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
+export PYTHONDONTWRITEBYTECODE=1
 
 rc=0
 echo "==> shellcheck"

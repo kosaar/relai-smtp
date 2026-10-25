@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # =============================================================================
 #  Fonctions communes aux suites de tests (sourcé par tests/run-tests.sh).
-#  Variables attendues : COMPOSE (tableau), TOKEN.
+#  Variables attendues : COMPOSE (tableau), TOKEN, WORK.
 # =============================================================================
 
 if [[ -t 1 ]]; then G=$'\e[32m'; R=$'\e[31m'; B=$'\e[1m'; N=$'\e[0m'; else G='' R='' B='' N=''; fi
@@ -36,6 +36,23 @@ is_healthy() { [[ $(docker inspect -f '{{.State.Health.Status}}' "$(cid "$1")" 2
 
 # smtp <service client> <options swaks...> : exécute swaks depuis un client.
 smtp() { local c=$1; shift; dc exec -T "$c" swaks --timeout 20 "$@" 2>&1; }
+
+# --- Soumission au relai (587) ---------------------------------------------------
+# app_password <application> : mot de passe SMTP de test de l'application.
+app_password() { cat "$WORK/secrets/apps/$1"; }
+
+# submit <client> <login> <sujet> [options swaks...] : soumission 587 en STARTTLS
+# (certificat de smtp-relay vérifié par l'AC de test) + AUTH PLAIN de <login>.
+# Par défaut : MAIL FROM et From: = <login>@example.com, destinataire alice.
+# Les options suivantes (--from, --to, --server, --h-From…) remplacent ces valeurs.
+submit() {
+    local c=$1 login=$2 subj=$3; shift 3
+    smtp "$c" --server smtp-relay --port 587 \
+        --tls --tls-verify --tls-ca-path /pki/ca.crt \
+        --auth PLAIN --auth-user "$login" --auth-password "$(app_password "$login")" \
+        --from "${login}@example.com" --to alice@example.com \
+        --header "Subject: ${subj}" --body "Test ${subj}" "$@"
+}
 
 # --- BAL du fournisseur, relevées en IMAPS depuis le poste de travail ------------
 # mb_fetch <bal> <motif> [attente_s] : message brut contenant <motif> (code 1 si absent).

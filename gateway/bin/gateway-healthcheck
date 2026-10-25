@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+# Healthcheck Docker de la passerelle : le port du milter accepte les connexions.
+import os
+import socket
+import sys
+
+port = int(os.environ.get("GATEWAY_HEALTH_PORT", "9900"))
+try:
+    socket.create_connection(("127.0.0.1", port), timeout=3).close()
+except OSError as e:
+    print(f"milter injoignable sur le port {port} : {e}")
+    sys.exit(1)
+print("ok")

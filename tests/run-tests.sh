@@ -63,7 +63,15 @@ printf 'relay-test' >"$WORK/secrets/relay_smtp_username"
 printf '%s' "$(rand 24)" >"$WORK/secrets/relay_smtp_password"
 printf '%s' "wrong-$(rand 16)" >"$WORK/secrets/relay_smtp_password_bad"
 printf '%s' "$(rand 24)" >"$WORK/secrets/mailbox_password"
-chmod 644 "$WORK"/secrets/*   # lisibles par le démon Docker (bind mount)
+# Inventaire de test (modifiable par les suites) et un secret par application.
+mkdir -p "$WORK/config" "$WORK/secrets/apps"
+cp tests/fixtures/applications.toml "$WORK/config/applications.toml"
+while read -r app; do
+    printf '%s' "$(rand 24)" >"$WORK/secrets/apps/$app"
+done < <(sed -n 's/^\[applications\.\([a-z0-9-]*\)\]$/\1/p' tests/fixtures/applications.toml)
+# Lisibles par le démon Docker (bind mounts) et par la passerelle (non root).
+find "$WORK/config" "$WORK/secrets" -type d -exec chmod 755 {} +
+find "$WORK/config" "$WORK/secrets" -type f -exec chmod 644 {} +
 
 if [[ ${SKIP_BUILD:-0} == 1 ]]; then
     info "SKIP_BUILD=1 : utilisation des images déjà présentes"

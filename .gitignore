@@ -3,8 +3,12 @@
 secrets/*
 !secrets/README.md
 !secrets/*.example
-config/allowed_clients.txt
+secrets/apps/*
 
 # Artefacts de test
 tests/.work/
 tests/.logs/
+
+# Python
+__pycache__/
+*.pyc

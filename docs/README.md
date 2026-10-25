@@ -1,32 +1,43 @@
-# Relai SMTP interne : notifications CI/CD vers un fournisseur cloud
+# Relai SMTP applicatif : notifications des applications vers un fournisseur cloud
 
-Ce relai centralise l'envoi des emails de GitLab CE et de Jenkins. Il accepte
-uniquement les applications déclarées (liste blanche d'IP), réécrit
-l'expéditeur, puis transmet les messages au MTA d'un fournisseur cloud
-(AWS SES, SendGrid, Mailjet, Brevo…) en **TLS ≥ 1.2 avec authentification SASL**.
+Ce relai centralise l'envoi des emails des applications internes (GitLab CE,
+Jenkins, GLPI, YouTrack…). Chaque application :
+
+- se connecte sur **`smtp-relay:587`**, en **STARTTLS obligatoire (TLS ≥ 1.2)** ;
+- s'authentifie avec **son propre identifiant** (SASL) ;
+- n'envoie que depuis **ses IP** déclarées et avec **son adresse** expéditrice.
+
+Les messages sont contrôlés par une passerelle (milter) **avant** d'être mis en
+file, puis transmis au MTA d'un fournisseur cloud (AWS SES, SendGrid, Mailjet,
+Brevo…) en **TLS ≥ 1.2 vérifié avec authentification SASL**.
 
 ```
-GitLab / Jenkins ──SMTP :25, clair, sans auth──▶ relai Postfix ──:587/465, TLS + SASL──▶ fournisseur cloud
-                    (liste blanche d'IP, refus par défaut)
+GitLab / Jenkins / GLPI / YouTrack ──587 STARTTLS + AUTH──▶ relai Postfix ──587/465 TLS + SASL──▶ fournisseur cloud
+                                                              │  ▲
+                                                     milter   ▼  │  (avant mise en file)
+                                                           passerelle
 ```
 
-Le schéma détaillé (zones, flux, contrôles) se trouve dans [architecture.md](architecture.md).
-Le guide de mise en production on-premise, avec Google Workspace ou OVHcloud comme
-fournisseur, se trouve dans [deploiement-production.md](deploiement-production.md).
+> **Version 2 (en cours) :** le relai évolue vers un relai **chiffrant** (OpenPGP,
+> annuaire de clés, quotas, contrôle du contenu), lot par lot, selon
+> [plan-implementation.md](plan-implementation.md). Ce document décrit l'état
+> actuel. Le schéma détaillé se trouve dans [architecture.md](architecture.md).
+> Le guide [deploiement-production.md](deploiement-production.md) décrit encore
+> la version 1 (port 25, liste blanche seule) ; il sera réécrit au lot 8.
 
 > **Valeurs d'exemple :** fournisseur `smtp.example-provider.com:587`, GitLab
-> `10.0.1.10`, Jenkins `10.0.1.20`, domaine `example.com`, expéditeur
-> `noreply@example.com`. Elles sont à remplacer (`<À PRÉCISER>` dans `.env.example`).
+> `10.0.1.10`, Jenkins `10.0.1.20`, domaine `example.com`. Elles sont à remplacer
+> (`<À PRÉCISER>` dans `.env.example` et `config/applications.toml`).
 
 ## Sommaire
 
 1. [Prérequis](#1-prérequis)
 2. [Contenu du dépôt et images](#2-contenu-du-dépôt-et-images)
-3. [Variables d'environnement et secrets](#3-variables-denvironnement-et-secrets)
+3. [Inventaire, variables et secrets](#3-inventaire-variables-et-secrets)
 4. [Déploiement](#4-déploiement)
-5. [Ajouter ou retirer une application autorisée](#5-ajouter-ou-retirer-une-application-autorisée)
+5. [Ajouter ou retirer une application](#5-ajouter-ou-retirer-une-application)
 6. [Exploitation](#6-exploitation)
-7. [Configuration de GitLab CE et de Jenkins](#7-configuration-des-applications)
+7. [Configuration des applications](#7-configuration-des-applications)
 8. [Tests locaux](#8-tests-locaux)
 9. [Sécurité](#9-points-de-sécurité)
 10. [Dépannage](#10-dépannage)
@@ -36,32 +47,38 @@ fournisseur, se trouve dans [deploiement-production.md](deploiement-production.m
 ## 1. Prérequis
 
 - Docker Engine 24 ou plus récent et Docker Compose v2.24 ou plus récent (syntaxe `!reset` / `!override` utilisée par la stack de test).
-- Un hôte situé dans le réseau privé, joignable par GitLab et Jenkins sur le port 25.
-- Une sortie Internet vers le fournisseur sur le port 587 ou 465. Beaucoup de clouds bloquent le port 25 sortant, il n'est donc pas utilisé.
+- Un hôte du VLAN Services, joignable par les applications sur le port **587**.
+- Un certificat pour le nom utilisé par les applications (ex. `smtp-relay.example.com`), émis par une autorité qu'elles reconnaissent (AC interne par exemple).
+- Une sortie Internet vers le fournisseur sur le port 587 ou 465.
 - Chez le fournisseur :
   - un compte SMTP (identifiant et mot de passe ou clé) ;
   - le **domaine d'expédition vérifié**, avec SPF, DKIM et DMARC publiés ;
-  - l'adresse d'expédition autorisée.
+  - les adresses expéditrices des applications autorisées (`gitlab@`, `jenkins@`…).
 - Pour les tests : bash, et un accès aux dépôts Ubuntu (`archive.ubuntu.com`, `security.ubuntu.com`) pendant la construction des images.
 
 ## 2. Contenu du dépôt et images
 
 ```
-docker-compose.yml        stack de production (service relay)
+docker-compose.yml        stack de production (services relay et gateway)
 docker-compose.test.yml   surcharge de test (fournisseur simulé, poste destinataire, clients, relai à mauvais identifiants)
-relay/Dockerfile          image du relai
+config/applications.toml  inventaire versionné des applications (login, adresse, IP, quota)
+common/relaycfg/          module Python partagé : lecture et validation de l'inventaire, CLI relay-config
+relay/Dockerfile          image du relai (contexte de construction : racine du dépôt)
 relay/entrypoint.sh       validation de la configuration, génération de /etc/postfix, lancement
-relay/config/*.tmpl       templates de main.cf et master.cf
-relay/scripts/            bibliothèque commune, healthcheck, rechargement de la liste blanche
+relay/config/*.tmpl       templates de main.cf, master.cf et de la configuration SASL
+relay/scripts/            bibliothèque commune, healthcheck
+gateway/                  passerelle (milter Python) appelée par Postfix avant la mise en file
 test/provider/            fournisseur simulé (Postfix 587 TLS + SASL -> Dovecot IMAPS) et PKI de test
 test/workstation/         poste destinataire simulé (RNP, GnuPG, relève IMAPS), test uniquement
 test/client/              client swaks, test uniquement
-secrets/                  emplacement des Docker secrets (ignoré par git)
+secrets/                  emplacement des secrets (ignoré par git)
 tests/run-tests.sh        orchestrateur des tests d'intégration et de bout en bout
 tests/lib.sh              fonctions communes aux suites
 tests/suites/NN-*.sh      une suite de tests par lot
+tests/fixtures/           inventaire de la stack de test
+tests/unit/               tests unitaires des modules Python purs
 tests/ci/lint.sh          contrôles statiques (shellcheck, Python, tests unitaires)
-.gitlab-ci.yml            CI : lint, tests d'intégration, publication de l'image
+.gitlab-ci.yml            CI : lint, relay-config check, tests d'intégration, publication des images
 ```
 
 ### Images Docker
@@ -72,10 +89,11 @@ pas de variante « slim »). Le tag est surchargeable avec `--build-arg UBUNTU_T
 
 | Image | Paquets Ubuntu | Rôle |
 |-------|----------------|------|
-| `relay` | `postfix`, `libsasl2-modules` (mécanismes client PLAIN/LOGIN), `ca-certificates` (vérification du certificat du fournisseur) | relai de production |
-| `test/provider` | `postfix`, `sasl2-bin` (`saslpasswd2`), `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
+| `relay` | `postfix`, `libsasl2-modules` (PLAIN/LOGIN), `libsasl2-modules-db` et `sasl2-bin` (base SASL des applications), `python3` (`relay-config`), `ca-certificates` | relai de production |
+| `gateway` | `python3`, `python3-milter` | passerelle de production (milter), exécutée sous un utilisateur non privilégié |
+| `test/provider` | `postfix`, `sasl2-bin`, `libsasl2-modules`, `openssl` (PKI de test), `dovecot-imapd`, `dovecot-lmtpd` | simule le fournisseur (smarthost + BAL) |
 | `test/workstation` | `rnp`, `gnupg`, `curl`, `openssl`, `python3` | simule le poste d'un destinataire (rôle de Thunderbird) |
-| `test/client` | `swaks`, `libnet-ssleay-perl`, `libauthen-sasl-perl`, `openssl`, `python3` | simule GitLab, Jenkins ou une application inconnue |
+| `test/client` | `swaks`, `libnet-ssleay-perl`, `libauthen-sasl-perl`, `openssl`, `python3` | simule une application (déclarée ou non) |
 
 Bonnes pratiques appliquées dans les Dockerfiles :
 
@@ -84,293 +102,297 @@ Bonnes pratiques appliquées dans les Dockerfiles :
 - `apt-get update`, installation et purge de `/var/lib/apt/lists` dans la même couche ;
 - `DEBIAN_FRONTEND` passé en `ARG`, donc non persisté dans l'image ;
 - labels OCI ;
-- `HEALTHCHECK` et `VOLUME` déclarés.
+- `HEALTHCHECK` (et `VOLUME` pour la file du relai) déclarés ;
+- contexte de construction filtré par `.dockerignore` (ni `.git`, ni `secrets`, ni tests).
 
-**Aucune configuration ni aucun secret n'est figé dans l'image.**
+**Aucune configuration ni aucun secret n'est figé dans les images.**
 
-### Entrypoint (`relay/entrypoint.sh`)
+### Entrypoint du relai (`relay/entrypoint.sh`)
 
-L'entrypoint enchaîne quatre étapes :
-
-1. **Validation.** Toutes les variables sont contrôlées : IP, domaine, adresse, port, niveau TLS, taille maximale, durée de file. À la moindre erreur, le conteneur s'arrête avec un code 1 et un message `FATAL: …`. Il ne démarre jamais en mode dégradé ou ouvert.
-2. **Liste blanche.** `ALLOWED_CLIENT_IPS` et `ALLOWED_CLIENT_IPS_FILE` sont fusionnés.
-   - Chaque IP devient `a.b.c.d/32` ou `[v6]/128`.
-   - Les notations CIDR, `0.0.0.0` et `::` sont refusées, et une liste vide aussi.
-3. **Génération de `/etc/postfix`.** `/etc/postfix` est un tmpfs (le système de fichiers racine est en lecture seule). L'entrypoint y restaure les fichiers du paquet Postfix, puis génère :
+1. **Inventaire.** `relay-config check` valide `config/applications.toml` et les secrets des applications (voir section 3). La moindre erreur arrête le conteneur (code 1) avec des lignes `FATAL: …`, toutes les erreurs étant listées ensemble.
+2. **Reste de la configuration.** Certificat de soumission (lisible, clé correspondante), passerelle, fournisseur, niveau TLS, taille maximale, durée de file. Le relai ne démarre jamais en mode dégradé ou ouvert.
+3. **Génération de `/etc/postfix`** (tmpfs, le système de fichiers racine est en lecture seule) :
    - `main.cf` et `master.cf` à partir des templates ;
-   - `sender_canonical.regexp` ;
-   - `sasl_passwd` (`root:root 0600`), construit à partir des Docker secrets.
+   - `relay-config postfix` génère `sender_login_maps` (adresse → login), `mynetworks` (IP de l'inventaire, en `/32` ou `/128`) et la base SASL `sasl/sasldb2` (`root:postfix 0640`), **reconstruite à chaque démarrage** ;
+   - `tls/submission.pem` (clé + chaîne, `0600`) ;
+   - `sasl_passwd` (`root:root 0600`), identifiants du fournisseur.
 4. **Démarrage.** `postfix check`, puis `exec postfix start-fg`. Postfix tourne en PID 1 et ses logs partent sur stdout.
+
+### Passerelle (`gateway/`)
+
+Postfix appelle la passerelle (`smtpd_milters = inet:gateway:9900`) pour chaque
+message, **avant** de répondre `250 queued`. Elle lit l'inventaire et vérifie :
+
+| Étape | Contrôle | Refus |
+|-------|----------|-------|
+| `MAIL FROM` | login SASL connu (`{auth_authen}`) | `550 5.7.1` |
+| `MAIL FROM` | IP du client déclarée pour **ce** login (`client_ips`) | `550 5.7.1` (`client-ip-mismatch`) |
+| `MAIL FROM` | enveloppe = adresse du login, expéditeur nul refusé | `553 5.7.1` / `550 5.7.1` |
+| fin du message | un seul en-tête `From:`, une seule adresse, égale à celle du login ; le nom affiché ne contient pas une autre adresse | `550 5.7.1` (`from-mismatch`, `from-multiple`, `from-invalid`, `from-display-spoof`) |
+
+Si la passerelle est arrêtée ou en erreur, Postfix répond `451` (erreur
+temporaire, l'application réessaie) : `milter_default_action = tempfail`.
+Les journaux de la passerelle ne contiennent que des métadonnées
+(identifiant de file, IP, login, motif), jamais le contenu ni les en-têtes.
+
+Les lots suivants y ajoutent les quotas, le contrôle du contenu et le
+chiffrement OpenPGP.
 
 ### Paramètres Postfix clés
 
 | Paramètre | Valeur | Pourquoi |
 |-----------|--------|----------|
-| `mynetworks` | `127.0.0.1/32` + IP déclarées en `/32` ou `/128` | seules les applications déclarées peuvent relayer ; la boucle locale sert au healthcheck et aux tests via `docker exec` |
-| `smtpd_client_restrictions`, `smtpd_relay_restrictions`, `smtpd_recipient_restrictions` | `permit_mynetworks, reject` | **refus par défaut** : tout client hors liste est rejeté |
-| `smtpd_delay_reject` | `yes` | le rejet se produit au `RCPT TO`, et la ligne de log contient alors l'IP, l'expéditeur, le destinataire et le motif |
-| `mydestination`, `relay_domains`, `local_transport = error` | vides / `error` | aucune réception entrante ni livraison locale : impossible d'être un open relay |
-| `smtpd_tls_security_level`, `smtpd_sasl_auth_enable` | `none`, `no` | côté réseau privé, ni TLS ni authentification (exigence) |
+| `master.cf` | service `submission` (587) seul | **pas de port 25** ; services minimaux, `chroot = n` |
+| `smtpd_tls_security_level` | `encrypt` | STARTTLS obligatoire : `530 5.7.0 Must issue a STARTTLS command first` sinon |
+| `smtpd_tls_protocols`, `smtpd_tls_mandatory_protocols`, `smtpd_tls_ciphers` | `>=TLSv1.2`, `high` | TLS 1.0 et 1.1 refusés dès la poignée de main |
+| `smtpd_tls_auth_only` | `yes` | AUTH n'est proposé qu'après STARTTLS : aucun mot de passe en clair |
+| `smtpd_sasl_type`, `cyrus_sasl_config_path` | `cyrus`, `/etc/postfix/sasl` | base `sasldb2` générée depuis l'inventaire, mécanismes PLAIN et LOGIN |
+| `smtpd_client_auth_rate_limit` | `RELAY_AUTH_RATE_LIMIT` (30/min) | limite les essais de mots de passe par IP (anvil), sans exception (`smtpd_client_event_limit_exceptions` vide) |
+| `mynetworks` + `smtpd_client_restrictions` | IP de l'inventaire ; `permit_mynetworks, reject` | liste blanche IP en défense en profondeur : toute autre IP est refusée dès la bannière (`smtpd_delay_reject = no`), avant même l'authentification |
+| `smtpd_sender_login_maps` + `reject_sender_login_mismatch` | `texthash:sender_login_maps` | `553 5.7.1 … not owned by user gitlab` si un login utilise l'adresse d'un autre ; `not logged in` sans authentification |
+| `smtpd_relay_restrictions`, `smtpd_recipient_restrictions` | `permit_sasl_authenticated, reject` | être dans `mynetworks` **ne suffit pas** pour relayer |
+| `smtpd_milters`, `milter_default_action` | `inet:gateway:9900`, `tempfail` | passerelle obligatoire avant la mise en file |
+| `mydestination`, `relay_domains`, `local_transport = error` | vides / `error` | aucune réception entrante ni livraison locale |
 | `disable_vrfy_command`, `smtpd_helo_required`, `smtpd_banner` | `yes`, `yes`, `$myhostname ESMTP` | pas d'énumération d'adresses, pas de version du logiciel exposée |
 | `relayhost` | `[RELAY_HOST]:RELAY_PORT` | les crochets désactivent la recherche MX : on contacte exactement l'hôte indiqué |
-| `smtp_tls_security_level` | `secure` (défaut) ou `encrypt` | TLS obligatoire ; `secure` vérifie en plus le certificat et le nom d'hôte (`nexthop, dot-nexthop`) |
+| `smtp_tls_security_level` | `secure` (défaut) ou `encrypt` | TLS obligatoire vers le fournisseur ; `secure` vérifie en plus le certificat et le nom d'hôte |
 | `smtp_tls_mandatory_protocols`, `smtp_tls_protocols` | `>=TLSv1.2` | TLS 1.0 et 1.1 interdits |
 | `smtp_tls_wrappermode` | `yes` si le port est 465 | TLS implicite (SMTPS) ; STARTTLS sinon |
-| `smtp_sasl_auth_enable`, `smtp_sasl_password_maps` | `yes`, `texthash:/etc/postfix/sasl_passwd` | authentification auprès du fournisseur ; `texthash` évite `postmap` et toute base binaire |
-| `smtp_sasl_security_options` | `noanonymous` | interdit les mécanismes anonymes |
-| `smtp_sasl_auth_soft_bounce` | `yes` | un refus d'authentification produit un report (le message reste en file) et non un rejet définitif |
-| `sender_canonical_maps` + `sender_canonical_classes` | `regexp:…`, `envelope_sender, header_sender` | réécrit le `MAIL FROM` et les en-têtes `From:` et `Sender:` |
-| `local_header_rewrite_clients` | `permit_mynetworks` | sans ce réglage, Postfix ne réécrit **pas** les en-têtes des clients distants |
-| `message_size_limit` | `MESSAGE_SIZE_LIMIT` | taille maximale des messages |
-| `maximal_queue_lifetime` | `QUEUE_LIFETIME` (5d) | durée de rétention d'un message non délivrable |
+| `smtp_sasl_password_maps` | `texthash:/etc/postfix/sasl_passwd` | authentification auprès du fournisseur |
+| `smtp_sasl_auth_soft_bounce` | `yes` | un refus d'authentification chez le fournisseur produit un report (le message reste en file) |
+| `message_size_limit`, `maximal_queue_lifetime` | `MESSAGE_SIZE_LIMIT`, `QUEUE_LIFETIME` | taille maximale, rétention d'un message non délivrable |
 | `maillog_file` | `/dev/stdout` | logs disponibles via `docker logs` |
-| `master.cf` | services minimaux, `chroot = n` | surface réduite ; le chroot est inutile dans un conteneur isolé et casse souvent DNS et TLS |
 
-### Réécriture de l'expéditeur
+## 3. Inventaire, variables et secrets
 
-Deux modes sont disponibles :
+### Inventaire des applications (`config/applications.toml`)
 
-- **`SENDER_REWRITE_MODE=always` (défaut, recommandé).** Tout message sort avec `SENDER_ADDRESS`, à la fois dans l'enveloppe et dans l'en-tête `From:`. Le nom affiché est conservé : `From: "GitLab" <gitlab@ci.internal>` devient `From: "GitLab" <noreply@example.com>`. Le fournisseur n'accepte que des expéditeurs vérifiés, et SPF et DMARC sont alignés.
-- **`SENDER_REWRITE_MODE=foreign`.** Seuls les expéditeurs qui n'appartiennent pas à `SENDER_DOMAIN` (ni à l'un de ses sous-domaines) sont réécrits. Une application qui émet déjà `ci@example.com` garde son adresse : elle doit alors aussi être vérifiée chez le fournisseur.
+Versionné : toute modification passe par une revue et par `relay-config check`
+en CI. Le nom de la table est le **login SMTP** de l'application.
 
-Dans les deux modes :
+```toml
+sender_domain = "example.com"      # domaine d'envoi vérifié chez le fournisseur
 
-- l'en-tête `Reply-To:` éventuel n'est pas modifié ;
-- les rapports de non-remise (expéditeur vide `<>`) ne sont pas réécrits ;
-- `myorigin = SENDER_DOMAIN` complète les adresses non qualifiées (`jenkins` devient `jenkins@example.com`) ;
-- `myhostname` vaut `relay.SENDER_DOMAIN`, sauf si `RELAY_HOSTNAME` est défini.
+[defaults]
+quota_per_hour = 200               # messages par heure glissante (appliqué au lot 5)
 
-## 3. Variables d'environnement et secrets
+[applications.gitlab]
+description = "GitLab : notifications"
+address = "gitlab@example.com"     # seule adresse utilisable par le login « gitlab »
+client_ips = ["10.0.1.10"]         # IP d'hôte, sans CIDR (IPv4 ou IPv6)
+quota_per_hour = 500               # optionnel
+```
+
+Règles vérifiées (toutes les erreurs sont listées ensemble) : clés connues
+uniquement ; nom en minuscules (`[a-z][a-z0-9-]`, 32 caractères au plus) ;
+adresse dans `sender_domain` et attribuée à une seule application ; au moins
+une IP d'hôte, ni CIDR, ni `0.0.0.0`, ni boucle locale, ni multicast ; quota
+entier de 1 à 100 000 ; au moins une application.
+
+```bash
+PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml
+PYTHONPATH=common python3 -m relaycfg check --inventory config/applications.toml --secrets-dir secrets/apps
+```
+
+### Variables d'environnement (`.env`)
 
 | Variable | Rôle | Défaut | Obligatoire |
 |----------|------|--------|:-----------:|
-| `ALLOWED_CLIENT_IPS` | IP des applications autorisées, séparées par des virgules (`10.0.1.10,10.0.1.20`). IPv4 ou IPv6, **sans CIDR** | — | **oui**¹ |
-| `ALLOWED_CLIENT_IPS_FILE` | chemin, dans le conteneur, d'un fichier monté (une IP par ligne, `#` pour les commentaires), réunie avec la variable précédente ; rechargeable à chaud | — | non¹ |
-| `RELAY_BIND_ADDRESS` | IP **privée** de l'hôte sur laquelle publier le port (compose) | — | **oui** |
-| `RELAY_PUBLISHED_PORT` | port publié sur l'hôte : 25 ou 587 (compose) | `25` | non |
-| `SENDER_DOMAIN` | domaine d'expédition vérifié chez le fournisseur ; sert aussi à dériver `myorigin` et `myhostname` | — | **oui** |
-| `SENDER_ADDRESS` | adresse d'expédition ; doit appartenir à `SENDER_DOMAIN` | `noreply@SENDER_DOMAIN` | non |
-| `SENDER_REWRITE_MODE` | `always` ou `foreign` | `always` | non |
-| `RELAY_HOSTNAME` | FQDN annoncé (`myhostname`, EHLO vers le fournisseur) | `relay.SENDER_DOMAIN` | non |
+| `RELAY_BIND_ADDRESS` | IP **privée** de l'hôte sur laquelle publier le port 587 (compose) | — | **oui** |
+| `RELAY_PUBLISHED_PORT` | port publié sur l'hôte | `587` | non |
+| `RELAY_HOSTNAME` | FQDN annoncé (`myhostname`, EHLO, realm SASL) | `relay.<sender_domain>` | non |
+| `RELAY_AUTH_RATE_LIMIT` | tentatives d'authentification par IP et par minute | `30` | non |
 | `RELAY_HOST` | MTA du fournisseur | — | **oui** |
 | `RELAY_PORT` | `587` (STARTTLS) ou `465` (TLS implicite) | `587` | non |
 | `RELAY_TLS_WRAPPERMODE` | `auto` (`yes` si le port est 465), `yes` ou `no` | `auto` | non |
 | `RELAY_TLS_SECURITY_LEVEL` | `secure` (certificat vérifié) ou `encrypt` ; `may` et `none` sont refusés | `secure` | non |
-| `RELAY_TLS_CA_FILE` | bundle des autorités de confiance | `/etc/ssl/certs/ca-certificates.crt` | non |
-| `RELAY_SASL_MECHANISMS` | mécanismes SASL autorisés | `plain, login` | non |
+| `RELAY_TLS_CA_FILE` | bundle des autorités de confiance pour le fournisseur | `/etc/ssl/certs/ca-certificates.crt` | non |
+| `RELAY_SASL_MECHANISMS` | mécanismes SASL autorisés vers le fournisseur | `plain, login` | non |
 | `MESSAGE_SIZE_LIMIT` | taille maximale d'un message, en octets | `10240000` | non |
 | `QUEUE_LIFETIME` | durée de vie en file (`5d`, `12h`…) | `5d` | non |
-| `RELAY_LISTEN_PORT` | port d'écoute **dans** le conteneur | `25` | non |
-| `RELAY_INET_PROTOCOLS` | `ipv4`, `ipv6` ou `all` | déduit de la liste | non |
+| `RELAY_INET_PROTOCOLS` | `ipv4`, `ipv6` ou `all` | `ipv4` | non |
 | `TZ` | fuseau horaire des logs | `UTC` | non |
-| `RELAY_IMAGE_TAG` | tag de l'image construite | `1.0.0` | non |
+| `RELAY_IMAGE_TAG` | tag des images construites | `2.0.0` | non |
 
-¹ Au moins une des deux sources doit fournir une IP valide, sinon le conteneur refuse de démarrer.
+Fixées dans `docker-compose.yml` : `RELAY_INVENTORY_FILE=/etc/relay/applications.toml`
+(répertoire `config/` monté en lecture seule), `RELAY_APP_SECRETS_DIR=/run/secrets/apps`
+(répertoire `secrets/apps/` monté en lecture seule), `RELAY_MILTER=inet:gateway:9900`.
 
-| Secret (Docker) | Fichier hôte | Rôle | Obligatoire |
-|-----------------|--------------|------|:-----------:|
-| `relay_smtp_username` | `secrets/relay_smtp_username` | identifiant SMTP du fournisseur | **oui** |
-| `relay_smtp_password` | `secrets/relay_smtp_password` | mot de passe ou clé SMTP | **oui** |
+### Secrets (`secrets/`, voir [secrets/README.md](../secrets/README.md))
 
-Ordre de lecture des identifiants :
+| Secret | Fichier hôte | Rôle |
+|--------|--------------|------|
+| `relay_smtp_username`, `relay_smtp_password` | `secrets/relay_smtp_*` | identifiants chez le fournisseur |
+| `relay_tls_cert`, `relay_tls_key` | `secrets/relay_tls_*` | certificat et clé de `smtp-relay` (port 587) |
+| — | `secrets/apps/<application>` | mot de passe SMTP de chaque application (16 caractères minimum, une ligne) |
 
-1. le chemin indiqué par `RELAY_SMTP_USERNAME_FILE` ou `RELAY_SMTP_PASSWORD_FILE` ;
-2. sinon le secret monté dans `/run/secrets/relay_smtp_*` ;
-3. en dernier recours, les variables `RELAY_SMTP_USERNAME` et `RELAY_SMTP_PASSWORD` (repli `.env`, déconseillé, signalé par un `WARNING` dans les logs).
+Ordre de lecture d'un secret `X` : le chemin indiqué par `X_FILE`, sinon
+`/run/secrets/x`, sinon (identifiants du fournisseur seulement) la variable `X`
+(repli `.env` déconseillé, signalé par un `WARNING`).
 
 ## 4. Déploiement
 
 ```bash
 cp .env.example .env                    # renseigner les valeurs <À PRÉCISER>
-install -m 600 /dev/null secrets/relay_smtp_username
-install -m 600 /dev/null secrets/relay_smtp_password
-printf '%s' 'IDENTIFIANT' > secrets/relay_smtp_username
-printf '%s' 'MOT_DE_PASSE' > secrets/relay_smtp_password
+vi config/applications.toml             # applications, adresses, IP
+# secrets : voir secrets/README.md (fournisseur, certificat, un fichier par application)
+PYTHONPATH=common python3 -m relaycfg check --secrets-dir secrets/apps --inventory config/applications.toml
 
 docker compose up -d --build
-docker compose ps                       # STATUS doit afficher (healthy)
-docker compose logs -f relay            # résumé de la configuration au démarrage
+docker compose ps                       # relay et gateway doivent afficher (healthy)
+docker compose logs relay               # résumé de la configuration au démarrage
 ```
 
-Le service est configuré pour la production avec :
+Les services sont configurés pour la production avec :
 
 - `restart: unless-stopped` ;
-- un système de fichiers racine en lecture seule, avec des tmpfs pour `/etc/postfix`, `/var/lib/postfix`, `/run` et `/tmp` ;
-- `cap_drop: ALL`, puis les seules capacités nécessaires au processus maître Postfix (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `NET_BIND_SERVICE`, `KILL`) ;
-- `no-new-privileges`, des limites de 0,5 CPU, 256 Mo de mémoire et 200 processus ;
+- un système de fichiers racine en lecture seule, avec des tmpfs ;
+- `cap_drop: ALL` ; le relai récupère les seules capacités nécessaires au processus maître Postfix (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `NET_BIND_SERVICE`, `KILL`) ; la passerelle tourne sans aucune capacité, sous un utilisateur non privilégié ;
+- `no-new-privileges`, des limites de CPU, de mémoire et de processus ;
 - des logs en rotation (5 × 10 Mo) ;
-- la file d'attente dans le volume nommé `relay-queue`.
+- la file d'attente dans le volume nommé `relay-queue` ;
+- relai et passerelle reliés par le réseau `backend` (`internal`, sans accès extérieur).
 
-> Postfix exige que son processus maître démarre en root : il ouvre le port 25
-> et lit les secrets, puis tous les démons qui traitent les messages (smtpd,
-> cleanup, qmgr, smtp) tournent sous l'utilisateur non privilégié `postfix`.
-
-Test de bout en bout depuis une machine autorisée :
+Test de bout en bout depuis le serveur d'une application déclarée :
 
 ```bash
-swaks --server <RELAY_BIND_ADDRESS> --port 25 --from gitlab@ci.internal --to vous@domaine.tld
+swaks --server smtp-relay.example.com --port 587 --tls --tls-verify \
+      --auth PLAIN --auth-user gitlab --auth-password "$(cat mot-de-passe-gitlab)" \
+      --from gitlab@example.com --to vous@domaine.tld
 ```
 
-**Mise à jour de l'image** (par exemple vers un nouveau tag Ubuntu daté) :
+**Mise à jour des images** (par exemple vers un nouveau tag Ubuntu daté) :
 modifier `UBUNTU_TAG`, puis lancer `docker compose up -d --build`. La file
 d'attente est conservée dans le volume.
 
-## 5. Ajouter ou retirer une application autorisée
+## 5. Ajouter ou retirer une application
 
-**Méthode A : variable `ALLOWED_CLIENT_IPS` (par défaut).**
+1. Ajoutez une table `[applications.<nom>]` dans `config/applications.toml`
+   (adresse, IP, quota) et faites-la valider en revue (la CI exécute `relay-config check`).
+2. Créez le secret `secrets/apps/<nom>` (voir [secrets/README.md](../secrets/README.md)).
+3. Redémarrez : `docker compose restart gateway relay`.
+4. Vérifiez : `docker compose logs relay | grep 'inventaire valide'`, puis
+   configurez l'application (section 7).
 
-```bash
-# Dans .env :
-ALLOWED_CLIENT_IPS=10.0.1.10,10.0.1.20,10.0.1.40   # ajout de 10.0.1.40
+Pendant le redémarrage (quelques secondes), les applications reçoivent une
+erreur temporaire et réessaient. Les mails déjà en file sont conservés.
 
-docker compose up -d                    # recrée le conteneur (quelques secondes)
-docker compose logs relay | grep "Clients autorisés"
-```
+Pour **retirer** une application, supprimez sa table et son secret, puis
+redémarrez : la base SASL étant reconstruite à chaque démarrage, son
+identifiant cesse immédiatement de fonctionner, et son IP n'est plus admise.
 
-Pendant la recréation, les applications reçoivent une erreur temporaire et
-réessaient. Les mails déjà en file sont conservés dans le volume.
-
-**Méthode B : fichier monté, rechargeable sans interruption.**
-
-1. Créez `config/allowed_clients.txt` (ignoré par git), avec une IP par ligne :
-
-   ```
-   10.0.1.10   # GitLab
-   10.0.1.20   # Jenkins
-   ```
-
-2. Dans `docker-compose.yml`, décommentez le volume `./config/allowed_clients.txt:/etc/relay/allowed_clients.txt:ro`.
-3. Dans `.env`, ajoutez `ALLOWED_CLIENT_IPS_FILE=/etc/relay/allowed_clients.txt`. La variable `ALLOWED_CLIENT_IPS` peut alors rester vide.
-4. Lancez `docker compose up -d` une première fois.
-
-Ensuite, pour chaque modification :
-
-```bash
-vi config/allowed_clients.txt
-docker compose exec relay relay-reload-allowlist   # puis postfix reload, sans coupure
-```
-
-Si la nouvelle liste est vide ou invalide, le rechargement est refusé et
-l'ancienne liste reste en vigueur.
-
-> Pour **retirer** une application, procédez de la même façon en supprimant son
-> IP. Les connexions SMTP déjà ouvertes se terminent normalement ; toute
-> nouvelle connexion est rejetée.
+**Rotation d'un mot de passe** : remplacez `secrets/apps/<nom>`, redémarrez le
+relai (`docker compose restart relay`), puis mettez à jour l'application.
 
 ## 6. Exploitation
 
 | Action | Commande |
 |--------|----------|
-| État et santé | `docker compose ps`, ou `docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q relay)` |
-| Logs en direct | `docker compose logs -f relay` |
-| Repérer les **rejets** (IP non autorisées) | `docker compose logs relay \| grep 'Client host rejected'` |
+| État et santé | `docker compose ps` |
+| Logs en direct | `docker compose logs -f relay gateway` |
+| Connexions refusées (IP non déclarées) | `docker compose logs relay \| grep 'Client host rejected'` |
+| Échecs d'authentification | `docker compose logs relay \| grep 'authentication failed'` |
+| Usurpations d'expéditeur | `docker compose logs relay \| grep 'not owned by user'` et `docker compose logs gateway \| grep reject` |
 | Mails remis au fournisseur | `docker compose logs relay \| grep 'status=sent'` |
 | Mails reportés (et la raison) | `docker compose logs relay \| grep 'status=deferred'` |
 | Contenu de la file | `docker compose exec relay postqueue -p`, ou `postqueue -j` pour du JSON |
 | Forcer un nouvel essai | `docker compose exec relay postqueue -f` |
-| Lire un message en file | `docker compose exec relay postcat -vq <QUEUE_ID>` |
 | Supprimer un message | `docker compose exec relay postsuper -d <QUEUE_ID>` |
-| **Vider** la file (tous les messages) | `docker compose exec relay postsuper -d ALL` |
-| Vider seulement les reportés | `docker compose exec relay postsuper -d ALL deferred` |
-| Recharger la configuration | `docker compose exec relay postfix reload` |
 | Configuration effective | `docker compose exec relay postconf -n` |
+| Vérifier l'inventaire dans le conteneur | `docker compose exec relay relay-config check` |
 
-Exemple de **rejet** dans les logs : l'IP source et le motif y figurent.
-
-```
-postfix/smtpd[123]: NOQUEUE: reject: RCPT from unknown[10.0.1.30]: 554 5.7.1 <dev@customer.test>: Client host rejected: Access denied; from=<app@unknown.internal> to=<dev@customer.test> proto=ESMTP helo=<unknown.ci.internal>
-```
-
-Exemple de **livraison** réussie :
+Exemples de lignes de log :
 
 ```
-postfix/smtp[456]: Verified TLS connection established to smtp.example-provider.com[x.x.x.x]:587: TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 ...
-postfix/smtp[456]: 4Zxyz...: to=<dev@customer.test>, relay=smtp.example-provider.com[x.x.x.x]:587, ..., status=sent (250 Ok queued)
+postfix/smtpd[12]: NOQUEUE: reject: CONNECT from unknown[10.0.1.30]: 554 5.7.1 <unknown[10.0.1.30]>: Client host rejected: Access denied; proto=SMTP
+postfix/smtpd[12]: warning: gitlab[10.0.1.10]: SASL PLAIN authentication failed: authentication failure, sasl_username=gitlab
+postfix/smtpd[12]: 3ED5FD2247: client=gitlab[10.0.1.10], sasl_method=PLAIN, sasl_username=gitlab
+relay-gateway: reject cid=65 qid=A73FDD20E2 stage=data client=10.0.1.10 login=gitlab reason=from-mismatch code=550
+postfix/smtp[45]: Verified TLS connection established to smtp.example-provider.com[x.x.x.x]:587: TLSv1.3 ...
+postfix/smtp[45]: 3ED5FD2247: to=<dev@customer.test>, relay=smtp.example-provider.com[x.x.x.x]:587, ..., status=sent (250 Ok queued)
 ```
 
-Pour la supervision, une alerte peut se déclencher sur :
-
-- l'état `unhealthy` du conteneur ;
-- une croissance de la file (`postqueue -j | wc -l`) ;
-- des occurrences de `status=deferred`, `SASL authentication failed` ou `Client host rejected`.
+Pour la supervision (en attendant l'exporteur de métriques du lot 7), une
+alerte peut se déclencher sur l'état `unhealthy` d'un conteneur, la croissance
+de la file, ou des occurrences de `status=deferred`, `authentication failed`,
+`Client host rejected`.
 
 ## 7. Configuration des applications
 
-Dans les deux cas, l'application parle au relai **sans TLS et sans
-authentification**, sur le port 25 de `RELAY_BIND_ADDRESS`. La valeur
-`relay.internal` utilisée ci-dessous est un exemple : remplacez-la par cette
-adresse ou par son nom DNS.
+Chaque application parle au relai en **STARTTLS sur le port 587, avec son
+identifiant**. Elle doit faire confiance à l'autorité qui a émis le certificat
+de `smtp-relay` (AC interne). L'adresse expéditrice doit être exactement celle
+de l'inventaire.
 
 ### GitLab CE (`/etc/gitlab/gitlab.rb`)
 
 ```ruby
 gitlab_rails['smtp_enable'] = true
-gitlab_rails['smtp_address'] = "relay.internal"
-gitlab_rails['smtp_port'] = 25
+gitlab_rails['smtp_address'] = "smtp-relay.example.com"
+gitlab_rails['smtp_port'] = 587
 gitlab_rails['smtp_domain'] = "example.com"
-gitlab_rails['smtp_authentication'] = false
-gitlab_rails['smtp_enable_starttls_auto'] = false
+gitlab_rails['smtp_authentication'] = "plain"
+gitlab_rails['smtp_user_name'] = "gitlab"
+gitlab_rails['smtp_password'] = "<mot de passe de secrets/apps/gitlab>"
+gitlab_rails['smtp_enable_starttls_auto'] = true
 gitlab_rails['smtp_tls'] = false
-gitlab_rails['smtp_openssl_verify_mode'] = 'none'
+gitlab_rails['smtp_openssl_verify_mode'] = 'peer'
 
-gitlab_rails['gitlab_email_from'] = 'noreply@example.com'
+gitlab_rails['gitlab_email_from'] = 'gitlab@example.com'
 gitlab_rails['gitlab_email_display_name'] = 'GitLab'
-gitlab_rails['gitlab_email_reply_to'] = 'noreply@example.com'
+gitlab_rails['gitlab_email_reply_to'] = 'gitlab@example.com'
 ```
 
-Appliquez la configuration, puis envoyez un mail de test :
+Si l'AC interne n'est pas dans le magasin système du serveur GitLab, ajoutez
+son certificat dans `/etc/gitlab/trusted-certs/`. Puis :
 
 ```bash
 sudo gitlab-ctl reconfigure
 sudo gitlab-rails runner "Notify.test_email('vous@domaine.tld', 'Test relai', 'OK').deliver_now"
 ```
 
-L'IP **source** de GitLab (par exemple `10.0.1.10`) doit figurer dans
-`ALLOWED_CLIENT_IPS`. Si GitLab tourne lui-même dans Docker, c'est l'IP vue
-par le relai qui compte : vérifiez-la dans les logs du relai.
-
 ### Jenkins
 
 **Plugin Mailer** (*Administrer Jenkins → System → Notification par email*) :
 
-- Serveur SMTP : `relay.internal`, port `25` ;
-- *Utiliser SSL* et *Utiliser TLS* décochés, aucune authentification ;
-- *Jenkins Location → Adresse email de l'administrateur système* : `Jenkins <noreply@example.com>`.
+- Serveur SMTP : `smtp-relay.example.com`, port `587` ;
+- *Utiliser TLS* coché (STARTTLS), *Utiliser SSL* décoché ;
+- authentification : utilisateur `jenkins`, mot de passe de `secrets/apps/jenkins` ;
+- *Jenkins Location → Adresse email de l'administrateur système* : `Jenkins <jenkins@example.com>`.
 
-**Plugin Email Extension** (*Extended E-mail Notification*) : mêmes valeurs
-(SMTP server, port 25, sans SSL/TLS ni credentials), et *Default user email
-suffix* : `@example.com`.
-
-Équivalent en Configuration as Code (JCasC), à adapter selon les versions des plugins :
+**Plugin Email Extension** : mêmes valeurs (identifiants stockés dans un
+*credential* Jenkins).
 
 ```yaml
 unclassified:
   location:
-    adminAddress: "Jenkins <noreply@example.com>"
+    adminAddress: "Jenkins <jenkins@example.com>"
   mailer:
-    smtpHost: "relay.internal"
-    smtpPort: "25"
+    smtpHost: "smtp-relay.example.com"
+    smtpPort: "587"
     useSsl: false
-    useTls: false
-  email-ext:
-    mailAccount:
-      smtpHost: "relay.internal"
-      smtpPort: "25"
-      useSsl: false
-      useTls: false
-    defaultSuffix: "@example.com"
+    useTls: true
+    authentication:
+      username: "jenkins"
+      password: "${JENKINS_SMTP_PASSWORD}"
 ```
 
-Pour vérifier, utilisez *Tester la configuration en envoyant un email*.
+L'AC interne doit être dans le magasin de confiance Java de Jenkins.
+
+### GLPI, YouTrack et autres
+
+Même principe : SMTP avec STARTTLS (« TLS », pas « SSL »), port 587,
+authentification avec le login de l'inventaire, expéditeur égal à l'adresse
+de l'inventaire.
 
 ## 8. Tests locaux
 
 ```bash
-tests/run-tests.sh          # construit, démarre, teste, puis nettoie (docker compose down -v)
-SUITES="00" tests/run-tests.sh   # n'exécute que les suites choisies (préfixes numériques)
-KEEP=1 tests/run-tests.sh   # conserve la stack pour l'inspecter
+tests/run-tests.sh                # construit, démarre, teste, puis nettoie (docker compose down -v)
+SUITES="00 01" tests/run-tests.sh # n'exécute que les suites choisies (préfixes numériques)
+KEEP=1 tests/run-tests.sh         # conserve la stack pour l'inspecter
 SKIP_BUILD=1 tests/run-tests.sh   # réutilise des images déjà construites (CI, registre interne)
-tests/ci/lint.sh            # contrôles statiques (aussi exécutés par la CI)
+tests/ci/lint.sh                  # contrôles statiques et tests unitaires (aussi exécutés par la CI)
 ```
 
 Les suites `tests/suites/NN-*.sh` s'exécutent dans l'ordre sur une seule stack.
@@ -383,39 +405,53 @@ retaguée : `docker pull mirror.gcr.io/library/ubuntu:resolute-20260927 &&
 docker tag mirror.gcr.io/library/ubuntu:resolute-20260927 ubuntu:resolute-20260927`.
 
 Le script lance `docker compose -p smtp-relay-test --env-file tests/test.env
--f docker-compose.yml -f docker-compose.test.yml`. Le relai testé est donc
-**celui de production**, surchargé uniquement par les paramètres de test.
+-f docker-compose.yml -f docker-compose.test.yml`. Le relai et la passerelle
+testés sont donc **ceux de production**, surchargés uniquement par les
+paramètres de test.
 
-Il génère à chaque exécution des identifiants SASL et un mot de passe de BAL
-aléatoires dans `tests/.work/` (ignoré par git). Le service one-shot `pki`
-génère une AC de test et les certificats `provider`, `smtp-relay` et `keydir`
-dans le volume `test-pki`. Aucun composant n'est simulé par un mock : les
-messages sont livrés par un vrai Postfix dans de vraies BAL Dovecot, et relus
-en IMAPS (certificat vérifié) depuis le poste de travail.
+À chaque exécution, il génère dans `tests/.work/` (ignoré par git) des mots de
+passe aléatoires (fournisseur, BAL, un par application) et une copie de
+l'inventaire de test `tests/fixtures/applications.toml`. Le service one-shot
+`pki` génère une AC de test et les certificats `provider`, `smtp-relay` et
+`keydir` dans le volume `test-pki`. Aucun composant n'est simulé par un mock :
+les messages sont soumis en STARTTLS (certificat vérifié) par swaks, livrés
+par un vrai Postfix dans de vraies BAL Dovecot, et relus en IMAPS (certificat
+vérifié) depuis le poste de travail.
 
 | Composant | IP | Rôle |
 |-----------|----|------|
-| `client-gitlab` | 10.0.1.10 | IP déclarée |
-| `client-jenkins` | 10.0.1.20 | IP déclarée |
+| `client-gitlab`, `client-jenkins`, `client-glpi`, `client-youtrack` | 10.0.1.10, .20, .40, .45 | applications déclarées |
 | `client-unknown` | 10.0.1.30 | IP **non** déclarée |
-| `relay` | 10.0.1.5 / 10.0.2.5 | relai avec identifiants valides |
-| `relay-badcreds` | 10.0.1.6 / 10.0.2.6 | même image, mot de passe erroné |
-| `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL sasldb) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
+| `client-new` | 10.0.1.50 | application ajoutée en cours de test (IT1.10) |
+| `relay` | 10.0.1.5 (alias `smtp-relay`) / 10.0.2.5 / 10.0.3.5 | relai avec identifiants valides |
+| `relay-badcreds` | 10.0.1.6 / 10.0.2.6 / 10.0.3.6 | même image, mot de passe erroné chez le fournisseur |
+| `gateway` | 10.0.3.20:9900 | passerelle (milter) |
+| `provider` | 10.0.2.10:587 et :993 | fournisseur simulé : Postfix (STARTTLS obligatoire, SASL) qui livre en LMTP à Dovecot ; BAL `alice@`, `bob@`, `carol@example.com` et `ext@partner.test`, consultables en IMAPS |
 | `workstation` | 10.0.2.50 | poste destinataire : relève les BAL en IMAPS (outil `mailbox`), RNP et GnuPG |
 
-Les deux réseaux Docker sont `internal`, sans accès à Internet.
+Les réseaux Docker de test (`private`, `internet`, `backend`) sont `internal`,
+sans accès à Internet.
 
 Vérifications automatiques (une ligne PASS/FAIL par test) :
 
 | Test | Attendu |
 |------|---------|
-| T1/T2 | un message envoyé depuis GitLab, puis depuis Jenkins, est **livré** dans la BAL d'alice et relu en IMAPS |
-| T3a/b/c | depuis l'IP inconnue : rejet `554 5.7.1`, rejet **tracé dans les logs** (IP + motif), aucun message en BAL |
-| T4a/b | `Return-Path` et `From:` du message reçu valent `noreply@example.com` (nom affiché conservé) |
-| T5a–e | logs du relai : `Verified TLS connection established … TLSv1.x` et `status=sent` ; logs du fournisseur : `sasl_username=relay-test` ; en-tête `Received` du message : `using TLSv1.x` et `Authenticated sender` ; livraison LMTP tracée par Dovecot |
-| T6a–d | avec de mauvais identifiants : `SASL authentication failed`, message **en file `deferred`**, non délivré, toujours présent après redémarrage (persistance du volume) |
-| T7 | le conteneur **refuse de démarrer** si la liste est vide, contient un CIDR ou une IP invalide |
+| T1/T2 | un message soumis par GitLab, puis par Jenkins, est **livré** dans la BAL d'alice et relu en IMAPS |
+| T3a/b/c | depuis l'IP inconnue : connexion refusée `554 5.7.1`, rejet **tracé dans les logs** (IP + motif), aucun message en BAL |
+| T4 | `Return-Path` et `From:` du message reçu valent l'adresse de l'application (plus de réécriture) |
+| T5a–e | logs du relai : `Verified TLS connection established … TLSv1.x` et `status=sent` ; logs du fournisseur : `sasl_username=relay-test` ; en-tête `Received` : `using TLSv1.x` et `Authenticated sender` ; livraison LMTP tracée par Dovecot |
+| T6a–d | avec de mauvais identifiants chez le fournisseur : `SASL authentication failed`, message **en file `deferred`**, non délivré, toujours présent après redémarrage |
 | T8 | le healthcheck du relai est `healthy` |
+| IT1.1 | GitLab, Jenkins, GLPI et YouTrack s'authentifient en STARTTLS (certificat vérifié) ; chaque message arrive dans la BAL |
+| IT1.2 | sans STARTTLS : AUTH non proposé, `530 5.7.0`, aucun mot de passe envoyé en clair |
+| IT1.3 | TLS 1.1 refusé à la poignée de main ; TLS 1.2 et 1.3 acceptés avec certificat vérifié |
+| IT1.4 | mauvais mot de passe : `535 5.7.8`, échec journalisé (IP, login) |
+| IT1.5 | sans authentification : refusé (`553`/`554 5.7.1`) |
+| IT1.6 | `MAIL FROM` d'une autre application : `553 5.7.1` ; `From:` usurpé, doublé ou nom affiché trompeur : `550 5.7.1` ; rien de livré ; journaux sans contenu |
+| IT1.7 | port 25 du relai : connexion refusée |
+| IT1.8 | identifiants valides depuis une IP non déclarée (`554`) ou depuis l'IP d'une autre application (`550`) : refusé |
+| IT1.9 | inventaire invalide (adresse en double, secret absent, adresse hors domaine, quota invalide) : relai et passerelle refusent de démarrer (`FATAL`) |
+| IT1.10 | ajout d'une application (entrée + secret) puis redémarrage : elle envoie, les autres ne sont pas affectées |
 
 **Nettoyage.** Il est automatique à la fin du script. Pour une stack conservée avec `KEEP=1` :
 
@@ -425,44 +461,41 @@ docker compose -p smtp-relay-test --env-file tests/test.env \
 rm -rf tests/.work
 ```
 
-Les réseaux de test utilisent `10.0.1.0/24` et `10.0.2.0/24`. En cas de
-conflit avec un réseau existant sur l'hôte, adaptez les sous-réseaux et les
-IP dans `docker-compose.test.yml` et dans `tests/suites/`.
+Les réseaux de test utilisent `10.0.1.0/24`, `10.0.2.0/24` et `10.0.3.0/24`.
+En cas de conflit avec un réseau existant sur l'hôte, adaptez les
+sous-réseaux et les IP dans `docker-compose.test.yml`, `tests/fixtures/` et
+`tests/suites/`.
 
 ## 9. Points de sécurité
 
-- **Pas d'open relay.** Le refus par défaut s'applique dès qu'une IP n'est pas listée. Aucun domaine local n'existe, et une liste vide ou invalide empêche le démarrage. Pour le vérifier depuis une IP non autorisée : `swaks --server <relai> --to test@gmail.com` doit renvoyer `554 5.7.1`.
+- **Pas d'open relay.** Relayer exige une authentification SASL ; aucun domaine local n'existe ; un inventaire vide ou invalide empêche le démarrage.
+- **Trois verrous par application** : son mot de passe, ses IP (liste blanche globale dès la connexion, puis liaison login ↔ IP dans la passerelle) et son adresse (enveloppe dans Postfix, `From:` dans la passerelle). Un identifiant volé ne sert ni depuis une autre machine, ni pour usurper une autre application.
+- **Aucun mot de passe en clair** : STARTTLS obligatoire avant AUTH, TLS ≥ 1.2. Essais limités par IP (`RELAY_AUTH_RATE_LIMIT`).
 - **L'IP source doit être la vraie.** Le filtrage repose sur l'IP vue par Postfix.
   - Avec la publication de ports Docker standard (NAT iptables), l'IP du client est conservée.
-  - Ne placez **pas** le relai derrière un proxy TCP, un load balancer en mode proxy ou un `userland-proxy` : Postfix verrait alors l'IP du proxy, et autoriser cette IP reviendrait à ouvrir le relai à tous les clients du proxy.
-  - En cas de doute, regardez les IP qui apparaissent dans `connect from …` dans les logs.
-  - `network_mode: host` ou un réseau macvlan sont des alternatives.
-- **Exposition réseau.**
-  - Publiez le port uniquement sur l'IP privée (`RELAY_BIND_ADDRESS`).
-  - Doublez ce filtrage d'un pare-feu ou d'un security group : le port 25 entrant n'est ouvert qu'aux IP de GitLab et Jenkins, et seul le port 587 ou 465 vers le fournisseur est autorisé en sortie.
-- **Secrets.**
-  - Les identifiants passent par des Docker secrets, jamais par l'image ni par `docker inspect`.
-  - `.env` et `secrets/*` sont ignorés par git.
-  - Dans le conteneur, les identifiants sont écrits dans un fichier `0600 root` sur un tmpfs.
-  - Faites tourner régulièrement les clés SMTP du fournisseur.
-- **TLS.**
-  - `secure` vérifie la chaîne de certificats et le nom de l'hôte, ce qui protège contre l'interception. N'utilisez `encrypt` que si le fournisseur présente un certificat non vérifiable, et documentez-le.
-  - TLS 1.0 et 1.1 sont interdits, avec des suites de chiffrement `high` uniquement.
-- **Le trafic réseau privé circule en clair** (exigence). Réservez ce segment aux serveurs CI/CD.
-- **Durcissement du conteneur** : système de fichiers racine en lecture seule, capacités minimales, `no-new-privileges`, limites de ressources, bannière sans version, `VRFY` désactivé.
-- **Côté fournisseur** : domaine vérifié, SPF, DKIM et DMARC publiés, quotas et alertes de réputation (bounces, plaintes) surveillés.
+  - Ne placez **pas** le relai derrière un proxy TCP ou un load balancer en mode proxy : Postfix verrait l'IP du proxy.
+- **Exposition réseau.** Publiez le port 587 uniquement sur l'IP privée (`RELAY_BIND_ADDRESS`) et doublez ce filtrage d'un pare-feu (VLAN Applications → 587 uniquement ; sortie vers le fournisseur uniquement).
+- **Secrets.** Fichiers montés en lecture seule, jamais dans l'image ni dans `docker inspect` ; `.env` et `secrets/*` sont ignorés par git ; dans le conteneur, base SASL `0640 root:postfix`, identifiants et clé TLS `0600 root`, sur tmpfs.
+- **TLS vers le fournisseur.** `secure` vérifie la chaîne et le nom de l'hôte ; TLS 1.0 et 1.1 interdits, suites `high` uniquement.
+- **Durcissement des conteneurs** : système de fichiers racine en lecture seule, capacités minimales (aucune pour la passerelle), `no-new-privileges`, limites de ressources, bannière sans version, `VRFY` désactivé.
+- **Côté fournisseur** : domaine vérifié, SPF, DKIM et DMARC publiés, quotas et alertes de réputation surveillés.
 
 ## 10. Dépannage
 
 | Symptôme | Cause probable / action |
 |----------|-------------------------|
-| Le conteneur redémarre en boucle, `FATAL: …` dans les logs | Variable invalide ou manquante (liste d'IP vide, `SENDER_ADDRESS` hors domaine, secret absent…). Le message indique la variable fautive. |
-| `554 5.7.1 … Client host rejected: Access denied` pour une application légitime | Son IP source n'est pas dans la liste. Comparez avec `connect from …[IP]` dans les logs (attention au NAT ou à un proxy), puis ajoutez l'IP (section 5). |
-| `status=deferred … SASL authentication failed` | Identifiants erronés ou expirés, ou mécanisme refusé. Vérifiez les secrets, puis lancez `docker compose up -d` et `docker compose exec relay postqueue -f`. |
-| `Server certificate not verified` ou `certificate verification failed` | Nom de `RELAY_HOST` différent de celui du certificat, ou autorité absente du bundle. Utilisez le nom officiel du fournisseur ou `RELAY_TLS_CA_FILE`. |
-| `TLS is required, but was not offered by host` | Mauvais port, ou port 465 sans `wrappermode`. Avec `RELAY_PORT=465`, le mode `auto` active le TLS implicite. |
-| `connect to …:587: Connection timed out` | Sortie bloquée par un pare-feu ou un security group, ou DNS. Testez depuis l'hôte avec `nc -vz <RELAY_HOST> 587`. |
-| `554 Message rejected: Email address is not verified` (fournisseur) | `SENDER_ADDRESS` ou `SENDER_DOMAIN` n'est pas vérifié chez le fournisseur. |
-| `552 5.3.4 Message size exceeds fixed limit` | Augmentez `MESSAGE_SIZE_LIMIT`, en respectant la limite du fournisseur (10 Mo chez SES par exemple). |
-| `unhealthy` | `docker compose exec relay relay-healthcheck` affiche la cause (processus maître arrêté, port fermé). |
-| La file grossit | `postqueue -p` pour lire la raison des reports, corrigez, puis `postqueue -f`. |
+| Le relai ou la passerelle redémarre en boucle, `FATAL: …` dans les logs | Inventaire ou secret invalide (adresse en double ou hors domaine, secret absent ou trop court…), certificat illisible, variable manquante. Le message indique l'élément fautif ; `PYTHONPATH=common python3 -m relaycfg check --secrets-dir secrets/apps` le reproduit hors conteneur. |
+| `554 5.7.1 … Client host rejected: Access denied` dès la connexion | L'IP source de l'application n'est pas dans l'inventaire. Comparez avec `connect from …[IP]` dans les logs (attention au NAT). |
+| `530 5.7.0 Must issue a STARTTLS command first` | L'application n'active pas STARTTLS (cocher « TLS », pas « SSL »). |
+| Échec de poignée de main TLS côté application | Le client ne fait pas confiance à l'AC du certificat de `smtp-relay`, utilise un autre nom que celui du certificat, ou est limité à TLS < 1.2. |
+| `535 5.7.8 Error: authentication failed` | Mauvais login ou mot de passe ; le login est le nom de l'application dans l'inventaire. |
+| `553 5.7.1 … not owned by user …` | L'application utilise une autre adresse que celle de l'inventaire (`MAIL FROM`). |
+| `550 5.7.1 From: header must be …` | L'en-tête `From:` diffère de l'adresse de l'inventaire. |
+| `550 5.7.1 This login is not allowed from this host` | Le login est utilisé depuis l'IP d'une autre application. |
+| `451 4.7.1` ou `4.3.5` à la fin du message | Passerelle arrêtée ou injoignable : `docker compose ps gateway`, `docker compose logs gateway`. |
+| `status=deferred … SASL authentication failed` | Identifiants du fournisseur erronés ou expirés. Vérifiez les secrets, puis `docker compose up -d` et `docker compose exec relay postqueue -f`. |
+| `Server certificate not verified` | Nom de `RELAY_HOST` différent de celui du certificat du fournisseur, ou autorité absente du bundle (`RELAY_TLS_CA_FILE`). |
+| `connect to …:587: Connection timed out` | Sortie bloquée par un pare-feu, ou DNS. Testez depuis l'hôte avec `nc -vz <RELAY_HOST> 587`. |
+| `554 Message rejected: Email address is not verified` (fournisseur) | L'adresse de l'application ou le domaine n'est pas vérifié chez le fournisseur. |
+| `552 5.3.4 Message size exceeds fixed limit` | Augmentez `MESSAGE_SIZE_LIMIT`, en respectant la limite du fournisseur. |
+| `unhealthy` | `docker compose exec relay relay-healthcheck` ou `docker compose exec gateway gateway-healthcheck` affiche la cause. |

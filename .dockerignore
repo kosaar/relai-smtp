@@ -1,0 +1,10 @@
+# Contexte de construction = racine du dépôt (images relay et gateway).
+# Rien de confidentiel ni de volumineux ne doit y entrer.
+.git
+.env
+secrets
+tests
+test
+docs
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,27 @@
+# Inventaire de la stack de TEST (copié dans tests/.work/config par run-tests.sh ;
+# la suite 01 y ajoute l'application « newapp » pour IT1.10).
+# 10.0.1.30 (client-unknown) n'est volontairement PAS déclarée.
+sender_domain = "example.com"
+
+[defaults]
+quota_per_hour = 200
+
+[applications.gitlab]
+description = "GitLab CE (test)"
+address = "gitlab@example.com"
+client_ips = ["10.0.1.10"]
+
+[applications.jenkins]
+description = "Jenkins (test)"
+address = "jenkins@example.com"
+client_ips = ["10.0.1.20"]
+
+[applications.glpi]
+description = "GLPI (test)"
+address = "glpi@example.com"
+client_ips = ["10.0.1.40"]
+
+[applications.youtrack]
+description = "YouTrack (test)"
+address = "youtrack@example.com"
+client_ips = ["10.0.1.45"]

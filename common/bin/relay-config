@@ -1,0 +1,9 @@
+#!/usr/bin/python3
+# relay-config : validation et rendu de l'inventaire des applications.
+# Voir common/relaycfg/cli.py (« relay-config --help »).
+import sys
+
+sys.path.insert(0, "/opt/relay/lib")
+from relaycfg.cli import main  # noqa: E402
+
+sys.exit(main())

@@ -1,0 +1,41 @@
+# =============================================================================
+#  Inventaire des applications autorisées à envoyer via le relai.
+#  Versionné : toute modification passe par une revue (merge request) et par
+#  « relay-config check » en CI.
+#
+#  Ajouter une application :
+#    1. une table [applications.<nom>] ci-dessous (<nom> = login SMTP) ;
+#    2. son mot de passe dans le fichier secrets/apps/<nom> (16 caractères min.,
+#       généré depuis le coffre-fort, jamais versionné) ;
+#    3. docker compose up -d (redémarre relay et gateway).
+#
+#  <À PRÉCISER> : IP et quotas ci-dessous sont des EXEMPLES.
+# =============================================================================
+
+# Domaine d'envoi (identique au domaine principal, validé chez le fournisseur).
+sender_domain = "example.com"
+
+[defaults]
+# Nombre maximal de messages acceptés par heure glissante et par application.
+quota_per_hour = 200
+
+[applications.gitlab]
+description = "GitLab : notifications de pipelines et de merge requests"
+address = "gitlab@example.com"
+client_ips = ["10.0.1.10"]
+quota_per_hour = 500
+
+[applications.jenkins]
+description = "Jenkins : résultats de builds"
+address = "jenkins@example.com"
+client_ips = ["10.0.1.20"]
+
+[applications.glpi]
+description = "GLPI : tickets"
+address = "glpi@example.com"
+client_ips = ["10.0.1.30"]
+
+[applications.youtrack]
+description = "YouTrack : suivi des demandes"
+address = "youtrack@example.com"
+client_ips = ["10.0.1.40"]

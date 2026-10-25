@@ -1,5 +1,15 @@
 # Mise en œuvre en production : relai on-premise vers Google Workspace ou OVHcloud
 
+> ⚠️ **Guide de la version 1, en cours de révision.** Depuis la version 2 (lot 1
+> du [plan d'implémentation](plan-implementation.md)), les applications se
+> connectent sur le port **587 en STARTTLS avec un identifiant par application**,
+> déclarées dans `config/applications.toml` ; le port 25, `ALLOWED_CLIENT_IPS`,
+> `SENDER_ADDRESS` et la réécriture d'expéditeur n'existent plus. Les parties de
+> ce guide sur l'architecture réseau, les fournisseurs (Google Workspace,
+> OVHcloud) et le pare-feu restent valables, en remplaçant le port 25 par le 587.
+> Pour la configuration du relai et des applications, suivez [README.md](README.md).
+> Ce guide sera réécrit au lot 8.
+
 Ce guide décrit le déploiement du relai SMTP en production dans l'architecture suivante :
 
 - **GitLab CE, Jenkins et le relai sont hébergés on-premise**, dans le datacenter de l'entreprise ;
